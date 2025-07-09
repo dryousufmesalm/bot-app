@@ -1,0 +1,74 @@
+# Patrick Display Project Rules + Memory Bank v0.7-beta Integration
+
+## Memory Bank System Integration
+- **Version**: v0.7-beta with token-optimized hierarchical rule loading
+- **Mode Workflows**: VAN → PLAN → CREATIVE → IMPLEMENT → REFLECT → ARCHIVE
+- **Complexity Levels**: 1-4 with level-specific workflows
+- **Rule Loading**: Hierarchical system in `.cursor/rules/isolation_rules/`
+- **Task Tracking**: Central source of truth in `memory-bank/tasks.md`
+
+## Project Structure
+- Views/: Contains all UI components and views
+- DB/: Database related code and operations
+- helpers/: Utility functions and helper modules
+- Strategy/: Trading strategy implementations
+- Bots/: Trading bot implementations
+- MetaTrader/: MetaTrader integration code
+- Api/: API-related functionality
+- memory-bank/: Memory Bank v0.7-beta files for persistent AI memory
+- custom_modes/: Custom mode instruction files for Cursor integration
+
+## Coding Patterns
+- Views follow a component-based structure
+- Use FletX for routing between views
+- Repository pattern for data access
+- Threading for background operations
+- Asyncio for non-blocking operations
+- Memory Bank workflow integration for development phases
+
+## File Naming Conventions
+- View files follow PascalCase naming: HomePageView.py
+- Route definitions use SCREAMING_SNAKE_CASE: HOME_PAGE
+- Use descriptive names that reflect component purpose
+- Memory Bank files use kebab-case: tasks.md, activeContext.md
+
+## Environment
+- Python 3 with virtual environment (venv)
+- Dependencies managed through requirements.txt
+- Run the application with `python main.py`
+- Cursor Editor v0.48+ with Custom Modes enabled
+- Claude 4 Sonnet/Opus recommended for Memory Bank workflows
+
+## Authentication
+- Dual authentication systems:
+  - MetaTrader 5
+  - PocketBase (remote)
+- Credentials can be stored locally
+
+## Data Flow
+- Views request data from repositories
+- Repositories interact with databases
+- Global state managed through helpers/store.py
+- Authentication managed through Views/auth/auth.py
+- Memory Bank maintains persistent context across AI sessions
+
+## Memory Bank Workflow Integration
+- **VAN Mode**: Project initialization and complexity assessment
+- **PLAN Mode**: Detailed implementation planning
+- **CREATIVE Mode**: Design decisions for complex components
+- **IMPLEMENT Mode**: Systematic code implementation
+- **REFLECT Mode**: Review and lessons learned documentation
+- **ARCHIVE Mode**: Comprehensive project documentation
+
+## Development Process
+- Use Memory Bank workflows for complex features (Level 3-4)
+- Simple tasks (Level 1-2) can use streamlined workflows
+- Always update memory-bank/tasks.md for task tracking
+- Maintain activeContext.md for current focus
+- Update progress.md for implementation status
+
+## Testing
+- Manual testing of application features
+- Verify login functionality for both authentication methods
+- Confirm proper trading bot operation
+- Validate account management functions 

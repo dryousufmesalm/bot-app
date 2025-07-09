@@ -1,0 +1,154 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual Environment
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Environment Variables
+.env
+.env.local
+.env.development
+.env.test
+.env.production
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
+data/
+logs/
+
+# Trading & Financial Data
+*.csv
+*.json
+*.xlsx
+account_data/
+trading_logs/
+backtest_results/
+
+# MetaTrader
+*.ex4
+*.ex5
+*.mq4
+*.mq5
+MQL4/
+MQL5/
+terminal.exe
+*.log
+
+# PocketBase
+pb_data/
+pb_migrations/*.pb
+pocketbase
+
+# Configuration Files (sensitive)
+config.json
+settings.json
+credentials.json
+*_config.json
+*_credentials.json
+
+# Temporary Files
+temp/
+tmp/
+*.tmp
+*.temp
+
+# OS
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Memory Bank (keep the structure but ignore sensitive content)
+memory-bank/sensitive/
+memory-bank/credentials/
+
+# Build artifacts
+*.pyc
+*.pyo
+*.pyd
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+
+# Flet
+.flet/
+
+# Node.js (for MCP servers)
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Flutter (if present)
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+.packages
+.pub-cache/
+.pub/
+build/
+flutter_*.png
+linked_*.ds
+unlinked.ds
+unlinked_spec.ds
+
+# Backup files
+*.bak
+*.backup
+*~
+
+# API Keys and Secrets
+api_keys.txt
+secrets.txt
+*.key
+*.pem
+*.p12
+*.pfx

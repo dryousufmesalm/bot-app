@@ -1,0 +1,11 @@
+[project]
+name = "patric-local-gui"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "flet>=0.25.2",
+    "pocketbase>=0.14.0",
+    "pydantic-settings>=2.7.1",
+]
