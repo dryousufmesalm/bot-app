@@ -135,6 +135,11 @@ class AdvancedCycle(cycle):
         self.reversal_history = cycle_data.get("reversal_history", [])
         self.initial_order_stop_loss = cycle_data.get("initial_order_stop_loss", 300.0)
         self.cycle_interval = cycle_data.get("cycle_interval", 100.0)
+        
+        # Recovery mode properties (NEW)
+        self.in_recovery_mode = cycle_data.get("in_recovery_mode", False)
+        self.recovery_zone_base_price = cycle_data.get("recovery_zone_base_price", None)
+        self.initial_stop_loss_price = cycle_data.get("initial_stop_loss_price", None)
 
     def _initialize_database_components(self):
         """Initialize in-memory components"""
@@ -1026,7 +1031,7 @@ class AdvancedCycle(cycle):
                 'initial_threshold_price': self.initial_threshold_price,
                 'reversal_threshold_pips': self.reversal_threshold_pips,
                 'order_interval_pips': self.order_interval_pips,
-                'batch_stop_loss_pips': self.batch_stop_loss_pips,
+                'batch_stop_loss_pips': getattr(self, 'batch_stop_loss_pips', 50.0),
                 'highest_buy_price': self.highest_buy_price,
                 'lowest_sell_price': self.lowest_sell_price,
                 'reversal_count': self.reversal_count,
@@ -1043,9 +1048,13 @@ class AdvancedCycle(cycle):
                 'direction_switches': self.direction_switches,
                 'total_orders': len(self.active_orders) + len(self.completed_orders),
                 'total_volume': sum(order.get('volume', 0.0) for order in self.active_orders + self.completed_orders),
-                'total_profit': self.total_profit,
+                'total_profit': getattr(self, 'total_profit', 0.0),
                 'is_closed': self.is_closed,
                 'close_reason': getattr(self, 'close_reason', None),
+                # Recovery mode fields (NEW)
+                'in_recovery_mode': getattr(self, 'in_recovery_mode', False),
+                'recovery_zone_base_price': getattr(self, 'recovery_zone_base_price', None),
+                'initial_stop_loss_price': getattr(self, 'initial_stop_loss_price', None),
                 'updated_at': datetime.datetime.now()
             }
             

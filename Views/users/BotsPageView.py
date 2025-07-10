@@ -4,7 +4,7 @@ from helpers.actions_creators import GetUser, GetAccount, isMt5Authorized
 from Views.globals.app_router import AppRoutes
 from Views.globals.app_logger import app_logger
 from fletx import Xview
-from Strategy.AdvancedCyclesTrader import AdvancedCyclesTrader
+from Strategy.AdvancedCyclesTrader_Organized import AdvancedCyclesTrader
 
 
 class BotsPageView(Xview):
