@@ -137,7 +137,7 @@ jobs:
         Write-Host "🚀 Uploading release info to PocketBase..."
         
         # Check if PocketBase credentials are available
-        if (-not $env:POCKETBASE_URL -or -not $env:POCKETBASE_EMAIL -or -not $env:POCKETBASE_PASSWORD) {
+        if (-not $env:POCKETBASE_URL -or -not $env:POCKETBASE_ADMIN_EMAIL -or -not $env:POCKETBASE_ADMIN_PASSWORD) {
           Write-Host "⚠️ PocketBase credentials not found - skipping upload"
           exit 0
         }
