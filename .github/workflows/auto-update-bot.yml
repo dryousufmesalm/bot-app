@@ -61,7 +61,7 @@ jobs:
     - name: Install dependencies
       shell: pwsh
       run: |
-        cd "bot app"
+       
         python -m pip install --upgrade pip
         
         # Install from requirements.txt if it exists
@@ -81,8 +81,7 @@ jobs:
       id: version
       shell: pwsh
       run: |
-        cd "bot app"
-        
+       
         # Check for manual version input
         $MANUAL_VERSION = "${{ github.event.inputs.version }}"
         
