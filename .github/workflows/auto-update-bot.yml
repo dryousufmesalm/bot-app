@@ -93,7 +93,7 @@ jobs:
       id: github_release
       shell: pwsh
       env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        GITHUB_TOKEN: ${{ secrets.TOKEN }}
       run: |
         # Check if tag exists, if not create it
         $tagExists = git tag -l "${{ steps.version.outputs.tag }}"
