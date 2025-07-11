@@ -326,80 +326,58 @@ class AdvancedCyclesTrader(Strategy):
                 logger.warning(f"Could not extract orders from PocketBase cycle: {e}")
             
             return {
-                # Core identification
+                # Core identification - match PocketBase schema exactly
                 'id': getattr(pb_cycle, 'id', '') or getattr(pb_cycle, 'cycle_id', ''),
                 'cycle_id': getattr(pb_cycle, 'id', '') or getattr(pb_cycle, 'cycle_id', ''),
                 'bot': getattr(pb_cycle, 'bot', ''),
                 'account': getattr(pb_cycle, 'account', ''),
                 'symbol': getattr(pb_cycle, 'symbol', self.symbol),
-                'magic_number': getattr(pb_cycle, 'magic_number', self.bot.magic_number),
                 
-                # Trading configuration
+                # Status and control fields
+                'is_closed': bool(getattr(pb_cycle, 'is_closed', False)),
+                'is_favorite': bool(getattr(pb_cycle, 'is_favorite', False)),
+                'status': getattr(pb_cycle, 'status', 'active'),
+                
+                # Trading configuration fields
+                'magic_number': getattr(pb_cycle, 'magic_number', self.bot.magic_number),
+                'entry_price': self._safe_float_value(getattr(pb_cycle, 'entry_price', 0.0)),
+                'stop_loss': self._safe_float_value(getattr(pb_cycle, 'stop_loss', 0.0)),
+                'take_profit': self._safe_float_value(getattr(pb_cycle, 'take_profit', 0.0)),
+                'lot_size': self._safe_float_value(getattr(pb_cycle, 'lot_size', self.lot_size)),
+                
+                # Direction fields
                 'direction': getattr(pb_cycle, 'direction', 'BUY'),
                 'current_direction': getattr(pb_cycle, 'current_direction', getattr(pb_cycle, 'direction', 'BUY')),
-                'entry_price': self._safe_float_value(getattr(pb_cycle, 'entry_price', 0.0)),
+                'direction_switched': bool(getattr(pb_cycle, 'direction_switched', False)),
+                
+                # Zone and threshold fields
                 'zone_base_price': self._safe_float_value(getattr(pb_cycle, 'zone_base_price', 0.0)),
                 'initial_threshold_price': self._safe_float_value(getattr(pb_cycle, 'initial_threshold_price', 0.0)),
+                'zone_threshold_pips': self._safe_float_value(getattr(pb_cycle, 'zone_threshold_pips', self.reversal_threshold_pips)),
+                'order_interval_pips': self._safe_float_value(getattr(pb_cycle, 'order_interval_pips', self.order_interval_pips)),
+                'batch_stop_loss_pips': self._safe_float_value(getattr(pb_cycle, 'batch_stop_loss_pips', self.initial_order_stop_loss)),
+                'zone_range_pips': self._safe_float_value(getattr(pb_cycle, 'zone_range_pips', self.cycle_interval)),
                 
-                # Zone and order settings
-                            'reversal_threshold_pips': self._safe_float_value(getattr(pb_cycle, 'reversal_threshold_pips', self.reversal_threshold_pips)),
-            'order_interval_pips': self._safe_float_value(getattr(pb_cycle, 'order_interval_pips', self.order_interval_pips)),
-            'initial_order_stop_loss': self._safe_float_value(getattr(pb_cycle, 'initial_order_stop_loss', self.initial_order_stop_loss)),
-            'cycle_interval': self._safe_float_value(getattr(pb_cycle, 'cycle_interval', self.cycle_interval)),
-                'lot_size': self._safe_float_value(getattr(pb_cycle, 'lot_size', self.lot_size)),
-                'take_profit_pips': self._safe_float_value(getattr(pb_cycle, 'take_profit_pips', 100.0)),
-                'stop_loss_pips': self._safe_float_value(getattr(pb_cycle, 'stop_loss_pips', 50.0)),
-                
-                # Orders data (crucial!)
-                'active_orders': active_orders,
-                'completed_orders': completed_orders,
-                
-                # Zone and trading state
-                'zone_activated': bool(getattr(pb_cycle, 'zone_activated', False)),
-                'initial_threshold_breached': bool(getattr(pb_cycle, 'initial_threshold_breached', False)),
-                'direction_switched': bool(getattr(pb_cycle, 'direction_switched', False)),
-                'direction_switches': int(getattr(pb_cycle, 'direction_switches', 0)),
+                # Cycle tracking fields
+                'lot_idx': int(getattr(pb_cycle, 'lot_idx', 0)),
+                'lower_bound': self._safe_float_value(getattr(pb_cycle, 'lower_bound', 0.0)),
+                'upper_bound': self._safe_float_value(getattr(pb_cycle, 'upper_bound', 0.0)),
                 'next_order_index': int(getattr(pb_cycle, 'next_order_index', 1)),
-                
-                # Batch and tracking
                 'current_batch_id': str(getattr(pb_cycle, 'current_batch_id', '')),
-                'done_price_levels': getattr(pb_cycle, 'done_price_levels', []),
                 'last_order_price': self._safe_float_value(getattr(pb_cycle, 'last_order_price', 0.0)),
                 'last_order_time': getattr(pb_cycle, 'last_order_time', None),
                 
-                # Base cycle fields (required by CT_cycle base class)
-                'initial': getattr(pb_cycle, 'initial', []),
-                'hedge': getattr(pb_cycle, 'hedge', []),
-                'recovery': getattr(pb_cycle, 'recovery', []),
-                'pending': getattr(pb_cycle, 'pending', []),
-                'closed': getattr(pb_cycle, 'closed', []),
-                'threshold': getattr(pb_cycle, 'threshold', []),
-                'lower_bound': self._safe_float_value(getattr(pb_cycle, 'lower_bound', 0.0)),
-                'upper_bound': self._safe_float_value(getattr(pb_cycle, 'upper_bound', 0.0)),
-                'lot_idx': int(getattr(pb_cycle, 'lot_idx', 0)),
-                'zone_index': int(getattr(pb_cycle, 'zone_index', 0)),
-                'threshold_upper': self._safe_float_value(getattr(pb_cycle, 'threshold_upper', 0.0)),
-                'threshold_lower': self._safe_float_value(getattr(pb_cycle, 'threshold_lower', 0.0)),
-                'base_threshold_lower': self._safe_float_value(getattr(pb_cycle, 'base_threshold_lower', 0.0)),
-                'base_threshold_upper': self._safe_float_value(getattr(pb_cycle, 'base_threshold_upper', 0.0)),
-                'cycle_type': getattr(pb_cycle, 'cycle_type', 'ACT'),
-                'opened_by': getattr(pb_cycle, 'opened_by', {}),
-                'is_pending': bool(getattr(pb_cycle, 'is_pending', False)),
-                
-                # Status
-                'is_active': bool(getattr(pb_cycle, 'is_active', True)),
-                'is_closed': bool(getattr(pb_cycle, 'is_closed', False)),
-                'status': getattr(pb_cycle, 'status', 'active'),
-                
-                # Statistics
-                'total_profit': self._safe_float_value(getattr(pb_cycle, 'total_profit', 0.0)),
+                # Volume and profit tracking
                 'total_volume': self._safe_float_value(getattr(pb_cycle, 'total_volume', 0.0)),
-                'total_orders': int(getattr(pb_cycle, 'total_orders', len(active_orders) + len(completed_orders))),
-                'active_orders_count': len(active_orders),
-                'completed_orders_count': len(completed_orders),
+                'total_profit': self._safe_float_value(getattr(pb_cycle, 'total_profit', 0.0)),
                 'accumulated_loss': self._safe_float_value(getattr(pb_cycle, 'accumulated_loss', 0.0)),
-                'zone_based_losses': self._safe_float_value(getattr(pb_cycle, 'zone_based_losses', 0.0)),
-                'batch_stop_loss_triggers': int(getattr(pb_cycle, 'batch_stop_loss_triggers', 0)),
+                'batch_losses': self._safe_float_value(getattr(pb_cycle, 'batch_losses', 0.0)),
+                
+                # Order statistics
+                'total_orders': int(getattr(pb_cycle, 'total_orders', len(active_orders) + len(completed_orders))),
+                'profitable_orders': int(getattr(pb_cycle, 'profitable_orders', 0)),
+                'loss_orders': int(getattr(pb_cycle, 'loss_orders', 0)),
+                'duration_minutes': int(getattr(pb_cycle, 'duration_minutes', 0)),
                 
                 # Reversal trading fields
                 'reversal_threshold_pips': self._safe_float_value(getattr(pb_cycle, 'reversal_threshold_pips', 300.0)),
@@ -410,7 +388,61 @@ class AdvancedCyclesTrader(Strategy):
                 'open_orders_pl': self._safe_float_value(getattr(pb_cycle, 'open_orders_pl', 0.0)),
                 'total_cycle_pl': self._safe_float_value(getattr(pb_cycle, 'total_cycle_pl', 0.0)),
                 'last_reversal_time': getattr(pb_cycle, 'last_reversal_time', None),
+                
+                # Recovery mode fields
+                'in_recovery_mode': bool(getattr(pb_cycle, 'in_recovery_mode', False)),
+                'recovery_zone_base_price': self._safe_float_value(getattr(pb_cycle, 'recovery_zone_base_price', 0.0)),
+                'initial_stop_loss_price': self._safe_float_value(getattr(pb_cycle, 'initial_stop_loss_price', 0.0)),
+                
+                # Closing information
+                'close_reason': getattr(pb_cycle, 'close_reason', ''),
+                'close_time': getattr(pb_cycle, 'close_time', None),
+                
+                # JSON fields - handle properly
+                'opened_by': getattr(pb_cycle, 'opened_by', {}),
+                'closing_method': getattr(pb_cycle, 'closing_method', {}),
+                'orders': getattr(pb_cycle, 'orders', []),
+                'orders_config': getattr(pb_cycle, 'orders_config', {}),
+                'done_price_levels': getattr(pb_cycle, 'done_price_levels', []),
+                'active_orders': active_orders,
+                'completed_orders': completed_orders,
                 'reversal_history': getattr(pb_cycle, 'reversal_history', []),
+                
+                # Cycle type
+                'cycle_type': getattr(pb_cycle, 'cycle_type', 'ACT'),
+                
+                # Base cycle fields (required by CT_cycle base class)
+                'initial': getattr(pb_cycle, 'initial', []),
+                'hedge': getattr(pb_cycle, 'hedge', []),
+                'recovery': getattr(pb_cycle, 'recovery', []),
+                'pending': getattr(pb_cycle, 'pending', []),
+                'closed': getattr(pb_cycle, 'closed', []),
+                'threshold': getattr(pb_cycle, 'threshold', []),
+                'zone_index': int(getattr(pb_cycle, 'zone_index', 0)),
+                'threshold_upper': self._safe_float_value(getattr(pb_cycle, 'threshold_upper', 0.0)),
+                'threshold_lower': self._safe_float_value(getattr(pb_cycle, 'threshold_lower', 0.0)),
+                'base_threshold_lower': self._safe_float_value(getattr(pb_cycle, 'base_threshold_lower', 0.0)),
+                'base_threshold_upper': self._safe_float_value(getattr(pb_cycle, 'base_threshold_upper', 0.0)),
+                'opened_by': getattr(pb_cycle, 'opened_by', {}),
+                'is_pending': bool(getattr(pb_cycle, 'is_pending', False)),
+                
+                # Status
+                'is_active': bool(getattr(pb_cycle, 'is_active', True)),
+                'active_orders_count': len(active_orders),
+                'completed_orders_count': len(completed_orders),
+                'zone_based_losses': self._safe_float_value(getattr(pb_cycle, 'zone_based_losses', 0.0)),
+                'batch_stop_loss_triggers': int(getattr(pb_cycle, 'batch_stop_loss_triggers', 0)),
+                
+                # Zone and trading state
+                'zone_activated': bool(getattr(pb_cycle, 'zone_activated', False)),
+                'initial_threshold_breached': bool(getattr(pb_cycle, 'initial_threshold_breached', False)),
+                'direction_switches': int(getattr(pb_cycle, 'direction_switches', 0)),
+                'take_profit_pips': self._safe_float_value(getattr(pb_cycle, 'take_profit_pips', 100.0)),
+                'stop_loss_pips': self._safe_float_value(getattr(pb_cycle, 'stop_loss_pips', 50.0)),
+                
+                # Backwards compatibility fields
+                'initial_order_stop_loss': self._safe_float_value(getattr(pb_cycle, 'batch_stop_loss_pips', self.initial_order_stop_loss)),
+                'cycle_interval': self._safe_float_value(getattr(pb_cycle, 'zone_range_pips', self.cycle_interval)),
                 
                 # Timestamps
                 'created': getattr(pb_cycle, 'created', datetime.datetime.now().isoformat()),
@@ -422,9 +454,7 @@ class AdvancedCyclesTrader(Strategy):
                 'sent_by_admin': bool(getattr(pb_cycle, 'sent_by_admin', False)),
                 'creation_method': getattr(pb_cycle, 'creation_method', 'manual'),
                 'closing_method': getattr(pb_cycle, 'closing_method', ''),
-                'close_reason': getattr(pb_cycle, 'close_reason', ''),
                 'closed_by': getattr(pb_cycle, 'closed_by', ''),
-                'close_time': getattr(pb_cycle, 'close_time', None),
                 'strategy_version': getattr(pb_cycle, 'strategy_version', '1.0.0'),
             }
         except Exception as e:
@@ -511,81 +541,95 @@ class AdvancedCyclesTrader(Strategy):
         """Prepare cycle data for database storage with proper JSON serialization"""
         try:
             data = {
-                # Core identification fields
-                'cycle_id': cycle.cycle_id,
-                'bot_id': str(self.bot.id),  # Fixed: was 'bot', should be 'bot_id'
-                'account': str(self.meta_trader.account_id),
+                'id': cycle.cycle_id,
+                'bot': str(self.bot.id),
+                'account': str(self.bot.account.id),
                 'symbol': cycle.symbol,
                 
-                # Required trading fields
+                # Status and control fields
+                'is_closed': getattr(cycle, 'is_closed', True),
+                'is_favorite': getattr(cycle, 'is_favorite', False),
+                'status': getattr(cycle, 'status', 'closed' if getattr(cycle, 'is_closed', True) else 'active'),
+                
+                # Trading configuration fields
                 'magic_number': getattr(self.bot, 'magic_number', 0),
-                'entry_price': float(getattr(cycle, 'entry_price', 0.0)),
-                'stop_loss': float(getattr(cycle, 'stop_loss', 0.0)),
-                'take_profit': float(getattr(cycle, 'take_profit', 0.0)),
-                'lot_size': float(getattr(cycle, 'lot_size', self.lot_size)),
+                'entry_price': self._safe_float_value(getattr(cycle, 'entry_price', 0.0)),
+                'stop_loss': self._safe_float_value(getattr(cycle, 'stop_loss', 0.0)),
+                'take_profit': self._safe_float_value(getattr(cycle, 'take_profit', 0.0)),
+                'lot_size': self._safe_float_value(getattr(cycle, 'lot_size', self.lot_size)),
                 
                 # Direction fields
                 'direction': cycle.current_direction,
                 'current_direction': cycle.current_direction,
+                'direction_switched': getattr(cycle, 'direction_switched', False),
                 
                 # Zone and threshold fields
-                'zone_base_price': float(getattr(cycle, 'zone_base_price', 0.0)),
-                'initial_threshold_price': float(getattr(cycle, 'initial_threshold_price', 0.0)),
-                'zone_threshold_pips': float(getattr(cycle, 'zone_threshold_pips', self.reversal_threshold_pips)),
-                'order_interval_pips': float(getattr(cycle, 'order_interval_pips', self.order_interval_pips)),
-                'batch_stop_loss_pips': float(getattr(cycle, 'batch_stop_loss_pips', self.initial_order_stop_loss)),
-                'zone_range_pips': float(getattr(cycle, 'zone_range_pips', 0.0)),
+                'zone_base_price': self._safe_float_value(getattr(cycle, 'zone_base_price', 0.0)),
+                'initial_threshold_price': self._safe_float_value(getattr(cycle, 'initial_threshold_price', 0.0)),
+                'zone_threshold_pips': self._safe_float_value(getattr(cycle, 'zone_threshold_pips', self.reversal_threshold_pips)),
+                'order_interval_pips': self._safe_float_value(getattr(cycle, 'order_interval_pips', self.order_interval_pips)),
+                'batch_stop_loss_pips': self._safe_float_value(getattr(cycle, 'initial_order_stop_loss', self.initial_order_stop_loss)),
+                'zone_range_pips': self._safe_float_value(getattr(cycle, 'cycle_interval', self.cycle_interval)),
                 
-                # Direction switching fields
-                'direction_switched': getattr(cycle, 'direction_switched', False),
-                'direction_switches': int(getattr(cycle, 'direction_switches', 0)),
+                # Cycle tracking fields
+                'lot_idx': int(getattr(cycle, 'lot_idx', 0)),
+                'lower_bound': self._safe_float_value(getattr(cycle, 'lower_bound', 0.0)),
+                'upper_bound': self._safe_float_value(getattr(cycle, 'upper_bound', 0.0)),
+                'next_order_index': int(getattr(cycle, 'next_order_index', 1)),
+                'current_batch_id': str(getattr(cycle, 'current_batch_id', '')),
                 
-                # Order tracking fields - use JSON serialization for nested objects
-                'done_price_levels': self._make_json_serializable(getattr(cycle, 'done_price_levels', [])),
-                'next_order_index': int(getattr(cycle, 'next_order_index', 0)),
-                'active_orders': self._make_json_serializable(getattr(cycle, 'active_orders', [])),
-                'completed_orders': self._make_json_serializable(getattr(cycle, 'completed_orders', [])),
-                'current_batch_id': getattr(cycle, 'current_batch_id', ''),
+                # Volume and profit tracking
+                'total_volume': self._safe_float_value(getattr(cycle, 'total_volume', 0.0)),
+                'total_profit': self._safe_float_value(getattr(cycle, 'total_profit', 0.0)),
+                'accumulated_loss': self._safe_float_value(getattr(cycle, 'accumulated_loss', 0.0)),
+                'batch_losses': self._safe_float_value(getattr(cycle, 'batch_losses', 0.0)),
                 
-                # Time and price tracking
-                'last_order_time': self._safe_datetime_string(getattr(cycle, 'last_order_time', None)),
-                'last_order_price': float(getattr(cycle, 'last_order_price', 0.0)),
-                
-                # Loss tracking - use JSON serialization for nested objects
-                'accumulated_loss': float(getattr(cycle, 'accumulated_loss', 0.0)),
-                'batch_losses': self._make_json_serializable(getattr(cycle, 'batch_losses', [])),
-                
-                # Status fields
-                'is_active': getattr(cycle, 'is_active', False),
-                'is_closed': getattr(cycle, 'is_closed', True),
-                'close_reason': getattr(cycle, 'close_reason', ''),
-                'close_time': self._safe_datetime_string(getattr(cycle, 'close_time', None)),
-                
-                # Profit tracking
-                'total_profit': float(getattr(cycle, 'total_profit', 0.0)),
+                # Order statistics
                 'total_orders': len(getattr(cycle, 'active_orders', [])) + len(getattr(cycle, 'completed_orders', [])),
                 'profitable_orders': int(getattr(cycle, 'profitable_orders', 0)),
                 'loss_orders': int(getattr(cycle, 'loss_orders', 0)),
+                'duration_minutes': int(getattr(cycle, 'duration_minutes', 0)),
                 
-                # Reversal trading fields (from migration)
-                'reversal_threshold_pips': float(getattr(cycle, 'reversal_threshold_pips', 300.0)),
+                # Reversal trading fields
+                'reversal_threshold_pips': self._safe_float_value(getattr(cycle, 'reversal_threshold_pips', 300.0)),
                 'highest_buy_price': self._safe_float_value(getattr(cycle, 'highest_buy_price', 0.0)),
                 'lowest_sell_price': self._safe_float_value(getattr(cycle, 'lowest_sell_price', 999999999.0)),
                 'reversal_count': int(getattr(cycle, 'reversal_count', 0)),
-                'closed_orders_pl': float(getattr(cycle, 'closed_orders_pl', 0.0)),
-                'open_orders_pl': float(getattr(cycle, 'open_orders_pl', 0.0)),
-                'total_cycle_pl': float(getattr(cycle, 'total_cycle_pl', 0.0)),
-                'last_reversal_time': self._safe_datetime_string(getattr(cycle, 'last_reversal_time', None)),
-                'reversal_history': self._make_json_serializable(getattr(cycle, 'reversal_history', [])),
+                'closed_orders_pl': self._safe_float_value(getattr(cycle, 'closed_orders_pl', 0.0)),
+                'open_orders_pl': self._safe_float_value(getattr(cycle, 'open_orders_pl', 0.0)),
+                'total_cycle_pl': self._safe_float_value(getattr(cycle, 'total_cycle_pl', 0.0)),
                 
-                # Metadata - use JSON serialization for nested objects
-                'updated': datetime.datetime.now().isoformat(),
+                # Recovery mode fields
+                'in_recovery_mode': getattr(cycle, 'in_recovery_mode', False),
+                'recovery_zone_base_price': self._safe_float_value(getattr(cycle, 'recovery_zone_base_price', 0.0)),
+                'initial_stop_loss_price': self._safe_float_value(getattr(cycle, 'initial_stop_loss_price', 0.0)),
+                
+                # Datetime fields
+                'last_reversal_time': self._safe_datetime_string(getattr(cycle, 'last_reversal_time', None)),
+                'last_order_time': self._safe_datetime_string(getattr(cycle, 'last_order_time', None)),
+                'close_time': self._safe_datetime_string(getattr(cycle, 'close_time', None)),
+                
+                # Closing information (pre-serialize to handle datetime objects)
+                'close_reason': getattr(cycle, 'close_reason', ''),
+                'closing_method': self._make_json_serializable(getattr(cycle, 'closing_method', {})),
                 'opened_by': self._make_json_serializable(getattr(cycle, 'opened_by', {})),
-                'closed_by': self._make_json_serializable(getattr(cycle, 'closed_by', {})),
-                'closing_method': getattr(cycle, 'closing_method', ''),
+                
+                # Cycle type
+                'cycle_type': getattr(cycle, 'cycle_type', 'ACT'),
+                
+                # Price tracking
+                'last_order_price': self._safe_float_value(getattr(cycle, 'last_order_price', 0.0)),
+                
+                # JSON fields - orders and configuration (pre-serialize to handle datetime objects)
+                'orders': self._make_json_serializable(getattr(cycle, 'active_orders', []) + getattr(cycle, 'completed_orders', [])),
+                'active_orders': self._make_json_serializable(getattr(cycle, 'active_orders', [])),
+                'completed_orders': self._make_json_serializable(getattr(cycle, 'completed_orders', [])),
+                'orders_config': self._make_json_serializable(getattr(cycle, 'orders_config', {})),
+                'done_price_levels': self._make_json_serializable(getattr(cycle, 'done_price_levels', [])),
+                'reversal_history': self._make_json_serializable(getattr(cycle, 'reversal_history', [])),
             }
             
-            # Final pass to ensure all data is JSON serializable
+            # Apply recursive JSON serialization to handle any nested datetime objects
             data = self._make_json_serializable(data)
             
             return data
@@ -1265,7 +1309,7 @@ class AdvancedCyclesTrader(Strategy):
         logger.info("Strategy monitoring loop stopped")
 
     def _update_active_cycles_sync(self):
-        """Update active cycles synchronously"""
+        """Update active cycles synchronously with real-time profit calculation"""
         try:
             # Get only truly active cycles
             active_cycles = self._get_only_active_cycles()
@@ -1273,15 +1317,23 @@ class AdvancedCyclesTrader(Strategy):
             # Get current market price
             current_price = self.meta_trader.get_bid(self.symbol)
             
-            # Update each active cycle
+            # Update each active cycle with live data and profit calculation
             for cycle in active_cycles.copy():
                 try:
-             
+                    # Update orders with live MT5 data (includes profit recalculation)
                     cycle.update_orders_with_live_data()
+                    
+                    # Update cycle status (includes profit recalculation)
                     cycle.update_cycle_status()
+                    
+                    # Force profit recalculation to ensure accuracy
+                    cycle._recalculate_total_profit()
+                    
+                    # Update database with latest profit information
+                    cycle._update_cycle_in_database()
                         
                 except Exception as e:
-                    logger.error(f"Error updating cycle {cycle.id}: {e}")
+                    logger.error(f"Error updating cycle {cycle.cycle_id}: {e}")
             
         except Exception as e:
             logger.error(f"Error updating active cycles: {e}")
@@ -1417,7 +1469,12 @@ class AdvancedCyclesTrader(Strategy):
     def _check_recovery_cycles_for_reversal(self, current_price: float, market_data: dict):
         """Check recovery cycles for reversal conditions based on recovery order prices"""
         try:
+            # Use list() to avoid modification during iteration since cycles may exit recovery mode
             for cycle_id, recovery_data in list(self.recovery_cycles.items()):
+                # Double-check cycle still exists in recovery tracking (might have been removed)
+                if cycle_id not in self.recovery_cycles:
+                    continue
+                    
                 if not recovery_data.get('recovery_activated', False):
                     continue
                 
@@ -1648,7 +1705,6 @@ class AdvancedCyclesTrader(Strategy):
             for cycle in cycles_to_check:
                 # Skip if cycle is in recovery mode without recovery orders (double check)
                 if self._is_cycle_in_recovery_without_orders(cycle):
-                    logger.debug(f"Skipping zone breach check for cycle {cycle.cycle_id} - in recovery mode without orders")
                     continue
                     
                 # Use zone engine to detect breaches
@@ -1662,7 +1718,7 @@ class AdvancedCyclesTrader(Strategy):
                     logger.info(f"Zone breach detected: {zone_status}")
                     # Handle zone breach logic here
                     #it should place new order in the same cycle directin
-                    # Place new order in the same cycle direction
+                    # Place new order in the same direction as the cycle
                     breach_direction = zone_status['breach_direction']
                     breach_price = current_price
                     if cycle.current_direction == breach_direction:
@@ -1786,7 +1842,12 @@ class AdvancedCyclesTrader(Strategy):
                 }
                 
                 cycle.add_order(order_for_cycle)
-                logger.info(f"Zone buy order placed synchronously: {order_data[0].ticket}")
+                
+                # Force profit recalculation and database update
+                cycle._recalculate_total_profit()
+                cycle._update_cycle_in_database()
+                
+                logger.info(f"Buy order placed: {order_data[0].ticket}")
                 
         except Exception as e:
             logger.error(f"Error placing buy order synchronously: {e}")
@@ -1833,7 +1894,12 @@ class AdvancedCyclesTrader(Strategy):
                 }
                 
                 cycle.add_order(order_for_cycle)
-                logger.info(f"sell recovery order placed synchronously: {order_data[0].ticket}")
+                
+                # Force profit recalculation and database update
+                cycle._recalculate_total_profit()
+                cycle._update_cycle_in_database()
+                
+                logger.info(f"Sell order placed: {order_data[0].ticket}")
                 
         except Exception as e:
             logger.error(f"Error placing sell order synchronously: {e}")
@@ -2673,6 +2739,30 @@ class AdvancedCyclesTrader(Strategy):
             logger.error(f"Error creating manual cycle synchronously: {e}")
             return False
 
+    def _calculate_cycle_total_profit_pips(self, cycle, current_price: float) -> float:
+        """
+        Calculate total profit for a cycle in account currency from all orders (active and completed)
+        
+        Args:
+            cycle: The cycle to calculate profit for
+            current_price: Current market price for unrealized profit calculation
+            
+        Returns:
+            float: Total profit in account currency (not pips)
+        """
+        try:
+            # Force recalculation of cycle profits to ensure accuracy
+            cycle._recalculate_total_profit()
+            
+            # Return the comprehensive total profit (includes profit, swap, commission)
+            total_profit = cycle.total_profit
+            
+            return total_profit
+            
+        except Exception as e:
+            logger.error(f"Error calculating cycle total profit: {e}")
+            return 0.0
+
     def _check_cycle_take_profit(self, cycle, current_price: float) -> bool:
         """
         Check if a cycle has hit its take profit threshold
@@ -2688,12 +2778,12 @@ class AdvancedCyclesTrader(Strategy):
             if not cycle or not hasattr(cycle, 'active_orders'):
                 return False
             
-            # Calculate total profit from all orders (active and completed)
+            # Calculate total profit from all orders (active and completed) in account currency
             total_profit = self._calculate_cycle_total_profit_pips(cycle, current_price)
             
             # Check if total profit exceeds take profit threshold
             if total_profit >= self.take_profit_pips:
-                logger.info(f"🟢 Take profit hit for cycle {cycle.cycle_id}: {total_profit:.2f} pips >= {self.take_profit_pips} pips")
+                logger.info(f"🟢 Take profit hit for cycle {cycle.cycle_id}: {total_profit:.2f} >= {self.take_profit_pips}")
                 return True
                 
             return False
@@ -2701,55 +2791,6 @@ class AdvancedCyclesTrader(Strategy):
         except Exception as e:
             logger.error(f"Error checking cycle take profit: {e}")
             return False
-
-    def _calculate_cycle_total_profit_pips(self, cycle, current_price: float) -> float:
-        """
-        Calculate total profit for a cycle in pips from all orders (active and completed)
-        
-        Args:
-            cycle: The cycle to calculate profit for
-            current_price: Current market price for unrealized profit calculation
-            
-        Returns:
-            float: Total profit in pips
-        """
-        try:
-            total_profit = 0.0
-            pip_value = self._get_pip_value()
-            
-            # Calculate profit from completed orders
-            for order in getattr(cycle, 'completed_orders', []):
-                try:
-                    # Get profit directly from order data (includes swap and commission)
-                    profit = float(order.get('profit', 0.0))
-                    swap = float(order.get('swap', 0.0))
-                    commission = float(order.get('commission', 0.0))
-                    
-                    # Total profit in money (profit + swap + commission)
-                    total_order_profit = profit + swap + commission
-                    total_profit    += total_order_profit
-                        
-                except Exception as order_error:
-                    logger.debug(f"Error calculating profit for completed order {order.get('ticket')}: {order_error}")
-                    continue
-            # Calculate unrealized profit from active orders
-            for order in getattr(cycle, 'active_orders', []):
-                try:
-                    profit = float(order.get('profit', 0.0))
-                    swap = float(order.get('swap', 0.0))
-                    commission = float(order.get('commission', 0.0))
-                    total_order_profit = profit + swap + commission
-                    total_profit += total_order_profit
-                except Exception as order_error:
-                    logger.debug(f"Error calculating unrealized profit for active order {order.get('ticket')}: {order_error}")
-                    continue
-            
-            logger.debug(f"Cycle {cycle.cycle_id} total profit: {total_profit:.2f} pips")
-            return total_profit
-            
-        except Exception as e:
-            logger.error(f"Error calculating cycle total profit in pips: {e}")
-            return 0.0
 
     def _close_cycle_take_profit_sync(self, cycle, current_price: float):
         """Close a cycle when take profit is hit (synchronous version)"""
@@ -2846,8 +2887,8 @@ class AdvancedCyclesTrader(Strategy):
                     if self._should_activate_recovery_zone(recovery_data, current_price):
                         self._activate_recovery_zone(cycle_id, recovery_data, current_price)
                 
-                # If recovery zone is active, manage zone-based orders
-                if recovery_data['recovery_activated']:
+                # If recovery zone is active and cycle still in recovery, manage zone-based orders
+                if cycle_id in self.recovery_cycles and recovery_data.get('recovery_activated', False):
                     self._manage_recovery_zone_orders(cycle_id, recovery_data, current_price)
                 
         except Exception as e:
@@ -2901,6 +2942,10 @@ class AdvancedCyclesTrader(Strategy):
     def _manage_recovery_zone_orders(self, cycle_id: str, recovery_data: dict, current_price: float):
         """Manage orders in the recovery zone"""
         try:
+            # Check if cycle is still in recovery mode (might have been removed after first order)
+            if cycle_id not in self.recovery_cycles:
+                return
+                
             cycle = recovery_data['cycle']
             initial_direction = recovery_data['initial_direction']
             placed_levels = recovery_data['placed_levels']
@@ -2984,7 +3029,15 @@ class AdvancedCyclesTrader(Strategy):
                 }
                 
                 cycle.add_order(order_for_cycle)
+                
+                # Force profit recalculation and database update
+                cycle._recalculate_total_profit()
+                cycle._update_cycle_in_database()
+                
                 logger.info(f"Recovery buy order placed: {order_data[0].ticket}")
+                
+                # Exit recovery mode after first recovery order is successfully placed
+                self._exit_recovery_mode_after_first_order(cycle.cycle_id, cycle)
                 
         except Exception as e:
             logger.error(f"Error placing recovery buy order: {e}")
@@ -3031,7 +3084,15 @@ class AdvancedCyclesTrader(Strategy):
                 }
                 
                 cycle.add_order(order_for_cycle)
+                
+                # Force profit recalculation and database update
+                cycle._recalculate_total_profit()
+                cycle._update_cycle_in_database()
+                
                 logger.info(f"Recovery sell order placed: {order_data[0].ticket}")
+                
+                # Exit recovery mode after first recovery order is successfully placed
+                self._exit_recovery_mode_after_first_order(cycle.cycle_id, cycle)
                 
         except Exception as e:
             logger.error(f"Error placing recovery sell order: {e}")
@@ -3043,6 +3104,33 @@ class AdvancedCyclesTrader(Strategy):
                 del self.recovery_cycles[cycle_id]
             if cycle_id in self.recovery_price_levels:
                 del self.recovery_price_levels[cycle_id]
-            logger.debug(f"Cleaned up recovery data for cycle {cycle_id}")
         except Exception as e:
             logger.error(f"Error cleaning up recovery cycle: {e}")
+
+    def _exit_recovery_mode_after_first_order(self, cycle_id: str, cycle):
+        """Remove cycle from recovery mode after first recovery order is placed"""
+        try:
+            # Remove from recovery tracking
+            if cycle_id in self.recovery_cycles:
+                del self.recovery_cycles[cycle_id]
+            if cycle_id in self.recovery_price_levels:
+                del self.recovery_price_levels[cycle_id]
+            
+            # Update cycle state to normal operation
+            cycle.in_recovery_mode = False
+            
+            # Update cycle in database (run async method in thread)
+            try:
+                import asyncio
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                loop.run_until_complete(self._update_cycle_in_database(cycle))
+                loop.close()
+            except Exception as db_error:
+                logger.error(f"❌ Failed to update database for recovery mode exit - cycle {cycle_id}: {db_error}")
+                # Continue with recovery mode exit even if database update fails
+            
+            logger.info(f"Recovery mode exited for cycle {cycle_id}")
+            
+        except Exception as e:
+            logger.error(f"Error exiting recovery mode for cycle {cycle_id}: {e}")

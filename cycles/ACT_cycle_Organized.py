@@ -319,41 +319,80 @@ class AdvancedCycle(cycle):
         value = getattr(self, attr_name, default)
         return self._safe_float_conversion(value, default)
 
+    def _recalculate_total_profit(self):
+        """Recalculate total profit for the cycle including ALL orders (active + completed)"""
+        try:
+            # Calculate profit from active orders (unrealized)
+            active_profit = 0.0
+            active_swap = 0.0
+            active_commission = 0.0
+            
+            for order in self.active_orders:
+                active_profit += float(order.get('profit', 0.0))
+                active_swap += float(order.get('swap', 0.0))
+                active_commission += float(order.get('commission', 0.0))
+            
+            # Calculate profit from completed orders (realized)
+            completed_profit = 0.0
+            completed_swap = 0.0
+            completed_commission = 0.0
+            
+            for order in self.completed_orders:
+                completed_profit += float(order.get('profit', 0.0))
+                completed_swap += float(order.get('swap', 0.0))
+                completed_commission += float(order.get('commission', 0.0))
+            
+            # Calculate total profit including swap and commission
+            self.total_profit = active_profit + completed_profit + active_swap + completed_swap + active_commission + completed_commission
+            
+            # Update separate tracking for reversal system
+            self.open_orders_pl = active_profit + active_swap + active_commission
+            self.closed_orders_pl = completed_profit + completed_swap + completed_commission
+            self.total_cycle_pl = self.total_profit
+            
+        except Exception as e:
+            logger.error(f"Error recalculating total profit: {e}")
+            self.total_profit = 0.0
+            self.open_orders_pl = 0.0
+            self.closed_orders_pl = 0.0
+            self.total_cycle_pl = 0.0
+
     def _update_cycle_statistics_after_order_add(self, order_data):
         """Update cycle statistics after adding an order"""
         try:
-            # Update order counts
-            self.total_orders = len(self.active_orders) + len(self.completed_orders)
-            
-            # Update volume
-            self.total_volume = sum(
-                order.get('volume', 0.0) for order in self.active_orders + self.completed_orders
-            )
-            
-            # Update profit
+            # Recalculate total profit to include new order
             self._recalculate_total_profit()
             
+            # Update price extremes
+            self._update_price_extremes(0.0)
+            
+            # Update database with new profit information
+            self._update_cycle_in_database()
+            
         except Exception as e:
-            logger.error(f"Error updating cycle statistics: {e}")
+            logger.error(f"Error updating cycle statistics after order add: {e}")
 
     def update_orders_with_live_data(self):
-        """Update all active orders with live data from MetaTrader"""
+        """Update orders with live data from MT5 and recalculate profits"""
         try:
-            if not self.active_orders:
-                return
-            
+            # Get current positions from MT5
             positions = self._get_mt5_positions()
+            
             if not positions:
                 return
             
+            # Create lookup dictionary for faster access
             positions_dict = self._create_positions_lookup(positions)
+            
+            # Update orders with live data
             updated_count = self._update_orders_from_positions(positions_dict)
             
+            # Recalculate total profit after updating orders
+            self._recalculate_total_profit()
+            
+            # Update database with latest profit information if orders were updated
             if updated_count > 0:
-                self._recalculate_total_profit()
-                # Update price extremes after order updates
-                self._update_price_extremes(0.0)
-                logger.debug(f"Updated {updated_count} orders with live data")
+                self._update_cycle_in_database()
             
         except Exception as e:
             logger.error(f"Error updating orders with live data: {e}")
@@ -379,67 +418,47 @@ class AdvancedCycle(cycle):
         return positions_dict
 
     def _update_orders_from_positions(self, positions_dict) -> int:
-        """Update orders from positions dictionary"""
+        """Update orders from MT5 positions data"""
         updated_count = 0
         
         for order in self.active_orders:
             try:
-                ticket = order.get('ticket')
-                if not ticket or int(ticket) not in positions_dict:
-                    continue
-                
-                live_pos = positions_dict[int(ticket)]
-                
-                # Update financial data
-                order['profit'] = self._safe_float_conversion(getattr(live_pos, 'profit', 0.0))
-                order['swap'] = self._safe_float_conversion(getattr(live_pos, 'swap', 0.0))
-                order['commission'] = self._safe_float_conversion(getattr(live_pos, 'commission', 0.0))
-                
-                # Update prices if missing
-                live_open_price = self._safe_float_conversion(getattr(live_pos, 'price_open', 0.0))
-                if live_open_price > 0 and order.get('open_price', 0.0) == 0.0:
-                    order['open_price'] = live_open_price
-                
-                # Update volume if missing
-                live_volume = self._safe_float_conversion(getattr(live_pos, 'volume', 0.0))
-                if live_volume > 0 and order.get('volume', 0.0) == 0.0:
-                    order['volume'] = live_volume
-                
-                # Update SL/TP
-                order['sl'] = self._safe_float_conversion(getattr(live_pos, 'sl', 0.0))
-                order['tp'] = self._safe_float_conversion(getattr(live_pos, 'tp', 0.0))
-                
-                # Add current price
-                current_price = self._safe_float_conversion(getattr(live_pos, 'price_current', 0.0))
-                if current_price > 0:
-                    order['current_price'] = current_price
-                
-                updated_count += 1
-                
+                ticket = str(order.get('ticket', ''))
+                if ticket in positions_dict:
+                    position = positions_dict[ticket]
+                    
+                    # Update order with live data
+                    order['profit'] = getattr(position, 'profit', 0.0)
+                    order['swap'] = getattr(position, 'swap', 0.0)
+                    order['commission'] = getattr(position, 'commission', 0.0)
+                    order['volume'] = getattr(position, 'volume', order.get('volume', 0.0))
+                    
+                    updated_count += 1
+                    
             except Exception as e:
                 logger.error(f"Error updating order {order.get('ticket', 'unknown')}: {e}")
         
         return updated_count
-
-    def _recalculate_total_profit(self):
-        """Recalculate total profit for the cycle"""
-        try:
-            active_profit = sum(order.get('profit', 0.0) for order in self.active_orders)
-            completed_profit = sum(order.get('profit', 0.0) for order in self.completed_orders)
-            self.total_profit = active_profit + completed_profit
-            
-        except Exception as e:
-            logger.error(f"Error recalculating total profit: {e}")
-            self.total_profit = 0.0
 
     # ==================== CYCLE STATUS MANAGEMENT ====================
 
     def update_cycle_status(self):
         """Update cycle status based on current conditions"""
         try:
+            # Update order statuses first
             self._update_order_statuses()
+            
+            # Recalculate profits after status updates
+            self._recalculate_total_profit()
+            
+            # Check cycle completion conditions
             self._check_cycle_completion_conditions()
+            
+            # Update reversal tracking
             self._update_reversal_tracking()
+            
+            # Update database with latest information
+            self._update_cycle_in_database()
             
         except Exception as e:
             logger.error(f"Error updating cycle status: {e}")
@@ -447,9 +466,15 @@ class AdvancedCycle(cycle):
     def _update_order_statuses(self):
         """Update the status of all orders in the cycle"""
         try:
+            orders_moved = 0
             for order in self.active_orders.copy():
                 if self._is_order_closed(order):
                     self._move_order_to_completed(order)
+                    orders_moved += 1
+            
+            # Recalculate profits if any orders were moved
+            if orders_moved > 0:
+                self._recalculate_total_profit()
                     
         except Exception as e:
             logger.error(f"Error updating order statuses: {e}")
@@ -474,21 +499,24 @@ class AdvancedCycle(cycle):
             return False
 
     def _move_order_to_completed(self, order):
-        """Move order from active to completed"""
+        """Move order from active to completed and update profits"""
         try:
             if order in self.active_orders:
                 self.active_orders.remove(order)
             
+            # Update order status
             order['status'] = 'closed'
-            order['close_time'] = datetime.datetime.now()
+            order['close_time'] = datetime.datetime.now().isoformat()
+            order['is_closed'] = True
             
             if order not in self.completed_orders:
                 self.completed_orders.append(order)
             
             # Update price extremes after removing order from active orders
-            self._update_price_extremes(0.0)  # Current price not needed for order-based calculation
+            self._update_price_extremes(0.0)
             
-            logger.info(f"Order {order.get('ticket')} moved to completed")
+            # Recalculate profits immediately
+            self._recalculate_total_profit()
             
         except Exception as e:
             logger.error(f"Error moving order to completed: {e}")
@@ -527,14 +555,18 @@ class AdvancedCycle(cycle):
         try:
             self.total_orders = len(self.active_orders) + len(self.completed_orders)
             self.total_volume = sum(
-                order.get('volume', 0.0) for order in self.active_orders + self.completed_orders
+                float(order.get('volume', 0.0)) for order in self.active_orders + self.completed_orders
             )
+            
+            # Ensure final profit calculation includes all orders
             self._recalculate_total_profit()
             
             # Calculate duration
             if hasattr(self, 'created_at') and self.created_at:
                 duration = datetime.datetime.now() - self.created_at
                 self.duration_minutes = duration.total_seconds() / 60
+            
+            logger.info(f"Cycle {self.cycle_id} closed - Orders: {self.total_orders}, Volume: {self.total_volume:.2f}, Profit: {self.total_profit:.2f}")
             
         except Exception as e:
             logger.error(f"Error calculating final statistics: {e}")
@@ -606,10 +638,8 @@ class AdvancedCycle(cycle):
                 # Find the order with the highest open price
                 highest_order = max(buy_orders, key=lambda order: order.get('open_price', 0.0))
                 self.highest_buy_price = highest_order.get('open_price', 0.0)
-                logger.debug(f"Updated highest_buy_price to {self.highest_buy_price} from order {highest_order.get('ticket')}")
             else:
                 self.highest_buy_price = 0.0
-                logger.debug("No active buy orders, reset highest_buy_price to 0.0")
                 
         except Exception as e:
             logger.error(f"Error updating highest buy price from orders: {e}")
@@ -624,11 +654,9 @@ class AdvancedCycle(cycle):
                 # Find the order with the lowest open price
                 lowest_order = min(sell_orders, key=lambda order: order.get('open_price', float('inf')))
                 self.lowest_sell_price = self._safe_float_conversion(lowest_order.get('open_price', 999999999.0))
-                logger.debug(f"Updated lowest_sell_price to {self.lowest_sell_price} from order {lowest_order.get('ticket')}")
             else:
                 # Use large finite number instead of infinity
                 self.lowest_sell_price = 999999999.0
-                logger.debug("No active sell orders, reset lowest_sell_price to large value")
                 
         except Exception as e:
             logger.error(f"Error updating lowest sell price from orders: {e}")
@@ -826,7 +854,7 @@ class AdvancedCycle(cycle):
     # ==================== DATABASE OPERATIONS ====================
 
     def _update_cycle_in_database(self):
-        """Update cycle in PocketBase database"""
+        """Update cycle in PocketBase database with latest profit information"""
         try:
             if not self.cycle_id:
                 logger.error("❌ Cannot update cycle in database: No cycle_id available")
@@ -838,44 +866,79 @@ class AdvancedCycle(cycle):
                 
             api_client = self.bot.api_client
             
-            # Prepare update data
+            # Ensure profits are up to date before saving
+            self._recalculate_total_profit()
+            
+            # Prepare comprehensive update data with latest profit information
             update_data = {
+                # Order data with latest information
                 "active_orders": json.dumps(serialize_datetime_objects(self.active_orders)),
                 "completed_orders": json.dumps(serialize_datetime_objects(self.completed_orders)),
                 "orders": json.dumps(serialize_datetime_objects(self.active_orders + self.completed_orders)),
+                
+                # Comprehensive profit tracking
+                "total_profit": self._safe_float_conversion(self.total_profit, 0.0),
+                "open_orders_pl": self._safe_float_conversion(self.open_orders_pl, 0.0),
+                "closed_orders_pl": self._safe_float_conversion(self.closed_orders_pl, 0.0),
+                "total_cycle_pl": self._safe_float_conversion(self.total_cycle_pl, 0.0),
+                
+                # Order and volume statistics
                 "total_orders": len(self.active_orders) + len(self.completed_orders),
+                "active_orders_count": len(self.active_orders),
+                "completed_orders_count": len(self.completed_orders),
                 "total_volume": self._safe_float_conversion(sum(float(order.get('volume', 0.0)) for order in self.active_orders + self.completed_orders)),
-                "total_profit": self._safe_getattr_float('total_profit', 0.0),
+                
+                # Status information
                 "status": "active" if self.is_active else "inactive",
                 "is_closed": self.is_closed,
                 "is_active": self.is_active,
+                
+                # Direction and trading state
                 "direction": self.current_direction,
                 "current_direction": self.current_direction,
                 "direction_switched": bool(getattr(self, 'direction_switched', False)),
                 "direction_switches": int(getattr(self, 'direction_switches', 0)),
+                
+                # Zone and order management
                 "next_order_index": int(getattr(self, 'next_order_index', 1)),
-                "accumulated_loss": self._safe_getattr_float('accumulated_loss', 0.0),
-                "last_order_price": self._safe_getattr_float('last_order_price', 0.0),
+                "accumulated_loss": self._safe_float_conversion(getattr(self, 'accumulated_loss', 0.0)),
+                "last_order_price": self._safe_float_conversion(getattr(self, 'last_order_price', 0.0)),
                 "zone_activated": bool(getattr(self, 'zone_activated', False)),
                 "initial_threshold_breached": bool(getattr(self, 'initial_threshold_breached', False)),
-                "zone_based_losses": self._safe_getattr_float('zone_based_losses', 0.0),
+                "zone_based_losses": self._safe_float_conversion(getattr(self, 'zone_based_losses', 0.0)),
                 "batch_stop_loss_triggers": int(getattr(self, 'batch_stop_loss_triggers', 0)),
                 "current_batch_id": str(getattr(self, 'current_batch_id', '')),
+                
+                # Reversal trading information
                 "reversal_count": int(getattr(self, 'reversal_count', 0)),
-                "highest_buy_price": self._safe_getattr_float('highest_buy_price', 0.0),
-                "lowest_sell_price": self._safe_getattr_float('lowest_sell_price', float('inf')),
-                "reversal_threshold_pips": self._safe_getattr_float('reversal_threshold_pips', 50.0),
-                "order_interval_pips": self._safe_getattr_float('order_interval_pips', 50.0),
-                "initial_order_stop_loss": self._safe_getattr_float('initial_order_stop_loss', 300.0),
-                "cycle_interval": self._safe_getattr_float('cycle_interval', 100.0)
+                "highest_buy_price": self._safe_float_conversion(getattr(self, 'highest_buy_price', 0.0)),
+                "lowest_sell_price": self._safe_float_conversion(getattr(self, 'lowest_sell_price', float('inf'))),
+                "reversal_threshold_pips": self._safe_float_conversion(getattr(self, 'reversal_threshold_pips', 50.0)),
+                
+                # Recovery mode fields
+                "in_recovery_mode": getattr(self, 'in_recovery_mode', False),
+                "recovery_zone_base_price": self._safe_float_conversion(getattr(self, 'recovery_zone_base_price', 0.0)),
+                "initial_stop_loss_price": self._safe_float_conversion(getattr(self, 'initial_stop_loss_price', 0.0)),
+                
+                # Configuration
+                "order_interval_pips": self._safe_float_conversion(getattr(self, 'order_interval_pips', 50.0)),
+                "initial_order_stop_loss": self._safe_float_conversion(getattr(self, 'initial_order_stop_loss', 300.0)),
+                "cycle_interval": self._safe_float_conversion(getattr(self, 'cycle_interval', 100.0)),
+                
+                # Timestamp
+                "updated": datetime.datetime.now().isoformat()
             }
             
-            # Handle datetime fields
+            # Handle datetime fields safely
             if hasattr(self, 'last_order_time') and self.last_order_time:
                 if isinstance(self.last_order_time, datetime.datetime):
                     update_data["last_order_time"] = self.last_order_time.isoformat()
                 else:
                     update_data["last_order_time"] = str(self.last_order_time)
+            
+            # Handle reversal history
+            if hasattr(self, 'reversal_history') and self.reversal_history:
+                update_data["reversal_history"] = json.dumps(serialize_datetime_objects(self.reversal_history))
             
             # Handle closing fields
             if hasattr(self, 'close_reason') and self.close_reason:
@@ -893,11 +956,9 @@ class AdvancedCycle(cycle):
             # Update using the unified cycle_id
             try:
                 api_client.update_ACT_cycle_by_id(self.cycle_id, update_data)
-                logger.debug(f"[SUCCESS] ACT Cycle {self.cycle_id} updated successfully")
                 return True
             except Exception as e:
                 logger.error(f"Error updating ACT cycle in database: {e}")
-                logger.error(f"Data keys sent: {list(update_data.keys())}")
                 return False
                 
         except Exception as e:
