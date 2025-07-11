@@ -1,0 +1,335 @@
+name: Auto Update Bot
+
+on:
+  push:
+    branches: [ main, develop ]
+    paths: 
+      - 'bot app/**'
+      - '.github/workflows/auto-update-bot.yml'
+  release:
+    types: [published]
+
+env:
+  POCKETBASE_URL: ${{ secrets.POCKETBASE_URL }}
+  POCKETBASE_ADMIN_EMAIL: ${{ secrets.POCKETBASE_ADMIN_EMAIL }}
+  POCKETBASE_ADMIN_PASSWORD: ${{ secrets.POCKETBASE_ADMIN_PASSWORD }}
+
+jobs:
+  build-and-upload:
+    runs-on: windows-latest  # Ensure Windows build
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+    
+    - name: Set up Python 3.13.0
+      uses: actions/setup-python@v4
+      with:
+        python-version: 3.13.0
+        architecture: 'x64'
+    
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        cd "bot app"
+        pip install -r requirements.txt
+        pip install requests pyinstaller
+    
+    - name: Get version info
+      id: version
+      shell: bash
+      run: |
+        # Extract version from version.txt or use git tag
+        if [ -f "bot app/version.txt" ]; then
+          VERSION=$(cat "bot app/version.txt")
+        elif [ "${{ github.event_name }}" == "release" ]; then
+          VERSION=${{ github.event.release.tag_name }}
+        else
+          # Use commit hash for development builds
+          VERSION="dev-$(git rev-parse --short HEAD)"
+        fi
+        
+        echo "version=$VERSION" >> $GITHUB_OUTPUT
+        echo "Build version: $VERSION"
+        
+        # Determine update type
+        if [ "${{ github.event_name }}" == "release" ]; then
+          UPDATE_TYPE="full"
+        elif [[ "$VERSION" == *"hotfix"* ]]; then
+          UPDATE_TYPE="hotfix"
+        elif [[ "$VERSION" == *"patch"* ]]; then
+          UPDATE_TYPE="patch"
+        else
+          UPDATE_TYPE="patch"
+        fi
+        
+        echo "update_type=$UPDATE_TYPE" >> $GITHUB_OUTPUT
+        echo "Update type: $UPDATE_TYPE"
+    
+    - name: Build Windows EXE
+      run: |
+        cd "bot app"
+        flet pack main.py --name "PatrickDisplayBot" --product-name "Patrick Display Bot" --file-version "${{ steps.version.outputs.version }}" --product-version "${{ steps.version.outputs.version }}"
+        
+        # Verify EXE was created
+        if (Test-Path "./dist/PatrickDisplayBot.exe") {
+          Write-Host "✅ EXE build successful"
+          Get-ChildItem "./dist/PatrickDisplayBot.exe" | Format-List Name, Length, LastWriteTime
+        } else {
+          Write-Host "❌ EXE build failed"
+          exit 1
+        }
+    
+    - name: Create update package
+      id: package
+      shell: bash
+      run: |
+        VERSION="${{ steps.version.outputs.version }}"
+        UPDATE_TYPE="${{ steps.version.outputs.update_type }}"
+        PACKAGE_NAME="patrick-display-bot-${VERSION}.zip"
+        
+        echo "Creating update package: $PACKAGE_NAME"
+        
+        # Create temporary directory for packaging
+        mkdir -p temp_package
+        
+        if [ "$UPDATE_TYPE" == "full" ]; then
+          # Full update: include entire bot app + EXE
+          cp -r "bot app" temp_package/
+          
+          # Include the built EXE
+          mkdir -p "temp_package/bot app/dist"
+          cp "bot app/dist/PatrickDisplayBot.exe" "temp_package/bot app/dist/"
+          
+          # Create launcher script for EXE
+          cat > "temp_package/bot app/run_exe.bat" << 'EOF'
+        @echo off
+        cd /d "%~dp0"
+        if exist "dist\PatrickDisplayBot.exe" (
+            echo Starting Patrick Display Bot EXE...
+            start "" "dist\PatrickDisplayBot.exe"
+        ) else (
+            echo EXE not found, starting Python version...
+            python main.py
+        )
+        EOF
+          
+          # Update requirements.txt for Windows
+          cat > "temp_package/bot app/requirements.txt" << EOF
+        flet>=0.21.0
+        MetaTrader5>=5.0.45
+        requests>=2.31.0
+        python-dotenv>=1.0.0
+        pyinstaller>=6.0.0
+        EOF
+          
+        else
+          # Patch/hotfix: include only changed files
+          CHANGED_FILES=$(git diff --name-only HEAD~1 HEAD | grep "^bot app/" || true)
+          
+          if [ -n "$CHANGED_FILES" ]; then
+            echo "Changed files:"
+            echo "$CHANGED_FILES"
+            
+            # Copy changed files maintaining directory structure
+            echo "$CHANGED_FILES" | while read file; do
+              if [ -f "$file" ]; then
+                mkdir -p "temp_package/$(dirname "$file")"
+                cp "$file" "temp_package/$file"
+              fi
+            done
+            
+            # Always include EXE for patch updates if main.py changed
+            if echo "$CHANGED_FILES" | grep -q "main.py"; then
+              mkdir -p "temp_package/bot app/dist"
+              cp "bot app/dist/PatrickDisplayBot.exe" "temp_package/bot app/dist/"
+              echo "Including updated EXE due to main.py changes"
+            fi
+            
+            # Create patch manifest
+            cat > temp_package/patch_manifest.json << EOF
+        {
+          "version": "$VERSION",
+          "update_type": "$UPDATE_TYPE",
+          "platform": "windows",
+          "files": [
+        EOF
+            
+            # Add file entries to manifest
+            FIRST=true
+            echo "$CHANGED_FILES" | while read file; do
+              if [ -f "$file" ]; then
+                if [ "$FIRST" = true ]; then
+                  FIRST=false
+                else
+                  echo "," >> temp_package/patch_manifest.json
+                fi
+                echo "    {\"action\": \"replace\", \"source\": \"$file\", \"target\": \"$file\"}" >> temp_package/patch_manifest.json
+              fi
+            done
+            
+            # Add EXE if included
+            if [ -f "temp_package/bot app/dist/PatrickDisplayBot.exe" ]; then
+              if [ "$FIRST" = false ]; then
+                echo "," >> temp_package/patch_manifest.json
+              fi
+              echo "    {\"action\": \"replace\", \"source\": \"bot app/dist/PatrickDisplayBot.exe\", \"target\": \"bot app/dist/PatrickDisplayBot.exe\"}" >> temp_package/patch_manifest.json
+            fi
+            
+            echo "" >> temp_package/patch_manifest.json
+            echo "  ]" >> temp_package/patch_manifest.json
+            echo "}" >> temp_package/patch_manifest.json
+          else
+            echo "No changes detected in bot app directory"
+            exit 1
+          fi
+        fi
+        
+        # Create zip package
+        cd temp_package
+        7z a -tzip "../$PACKAGE_NAME" .
+        cd ..
+        
+        echo "package_path=$PACKAGE_NAME" >> $GITHUB_OUTPUT
+        echo "Package created: $PACKAGE_NAME ($(du -h $PACKAGE_NAME | cut -f1))"
+    
+    - name: Upload to GitHub Releases (if release)
+      if: github.event_name == 'release'
+      uses: actions/upload-release-asset@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ github.event.release.upload_url }}
+        asset_path: ${{ steps.package.outputs.package_path }}
+        asset_name: ${{ steps.package.outputs.package_path }}
+        asset_content_type: application/zip
+    
+    - name: Upload EXE to GitHub Releases (if release)
+      if: github.event_name == 'release'
+      uses: actions/upload-release-asset@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ github.event.release.upload_url }}
+        asset_path: bot app/dist/PatrickDisplayBot.exe
+        asset_name: PatrickDisplayBot-v${{ steps.version.outputs.version }}.exe
+        asset_content_type: application/octet-stream
+    
+    - name: Upload to PocketBase
+      shell: bash
+      run: |
+        python << 'EOF'
+        import requests
+        import json
+        import os
+        from datetime import datetime
+        
+        # Configuration
+        POCKETBASE_URL = os.environ['POCKETBASE_URL']
+        ADMIN_EMAIL = os.environ['POCKETBASE_ADMIN_EMAIL']
+        ADMIN_PASSWORD = os.environ['POCKETBASE_ADMIN_PASSWORD']
+        
+        VERSION = "${{ steps.version.outputs.version }}"
+        UPDATE_TYPE = "${{ steps.version.outputs.update_type }}"
+        PACKAGE_PATH = "${{ steps.package.outputs.package_path }}"
+        
+        print(f"Uploading to PocketBase: {POCKETBASE_URL}")
+        
+        # Authenticate as admin
+        auth_response = requests.post(
+            f"{POCKETBASE_URL}/api/admins/auth-with-password",
+            json={
+                "identity": ADMIN_EMAIL,
+                "password": ADMIN_PASSWORD
+            }
+        )
+        
+        if auth_response.status_code != 200:
+            print(f"Authentication failed: {auth_response.text}")
+            exit(1)
+        
+        auth_data = auth_response.json()
+        admin_token = auth_data['token']
+        
+        headers = {
+            'Authorization': f'Bearer {admin_token}'
+        }
+        
+        # Upload file first
+        with open(PACKAGE_PATH, 'rb') as f:
+            files = {
+                'file': (PACKAGE_PATH, f, 'application/zip')
+            }
+            
+            upload_response = requests.post(
+                f"{POCKETBASE_URL}/api/files/upload",
+                headers=headers,
+                files=files
+            )
+        
+        if upload_response.status_code != 200:
+            print(f"File upload failed: {upload_response.text}")
+            exit(1)
+        
+        upload_data = upload_response.json()
+        file_url = upload_data['url']
+        
+        print(f"File uploaded successfully: {file_url}")
+        
+        # Create update record
+        update_data = {
+            "platform": "bot",
+            "version": VERSION,
+            "update_type": UPDATE_TYPE,
+            "download_url": file_url,
+            "file_size": os.path.getsize(PACKAGE_PATH),
+            "auto_update": True,
+            "restart_required": True,
+            "restart_delay": 30,
+            "release_notes": f"Automated Windows update for version {VERSION}",
+            "is_stable": "${{ github.event_name }}" == "release",
+            "created_by": "GitHub Actions",
+            "build_info": {
+                "commit": "${{ github.sha }}",
+                "branch": "${{ github.ref_name }}",
+                "workflow": "${{ github.workflow }}",
+                "run_id": "${{ github.run_id }}",
+                "platform": "windows",
+                "architecture": "x64",
+                "python_version": "3.13.0"
+            }
+        }
+        
+        create_response = requests.post(
+            f"{POCKETBASE_URL}/api/collections/updates/records",
+            headers=headers,
+            json=update_data
+        )
+        
+        if create_response.status_code == 200:
+            record_data = create_response.json()
+            print(f"✅ Update record created successfully: {record_data['id']}")
+            print(f"Version: {VERSION}")
+            print(f"Type: {UPDATE_TYPE}")
+            print(f"Platform: Windows x64")
+            print(f"Download URL: {file_url}")
+        else:
+            print(f"❌ Failed to create update record: {create_response.text}")
+            exit(1)
+        
+        EOF
+    
+    - name: Cleanup
+      run: |
+        Remove-Item -Path "temp_package" -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Item -Path "${{ steps.package.outputs.package_path }}" -Force -ErrorAction SilentlyContinue
+    
+    - name: Notify success
+      run: |
+        echo "🎉 Windows bot update uploaded successfully!"
+        echo "Version: ${{ steps.version.outputs.version }}"
+        echo "Type: ${{ steps.version.outputs.update_type }}"
+        echo "Platform: Windows x64"
+        echo "Bots will automatically update within 5 minutes." 
