@@ -2,11 +2,19 @@ name: Auto Update Bot
 
 on:
   push:
+    tags:
+      - 'v*'  # Trigger on version tags like v1.0.72
     branches: [ main, develop ]
     paths: 
       - '**'
   release:
     types: [published]
+  workflow_dispatch:  # Allow manual triggering
+    inputs:
+      version:
+        description: 'Version number (e.g., 1.0.72)'
+        required: false
+        default: ''
 
 env:
   POCKETBASE_URL: ${{ secrets.POCKETBASE_URL }}
@@ -14,7 +22,7 @@ env:
   POCKETBASE_ADMIN_PASSWORD: ${{ secrets.POCKETBASE_ADMIN_PASSWORD }}
 
 jobs:
-  build-and-upload:
+  build-and-release:
     runs-on: windows-latest
     
     steps:
@@ -36,105 +44,263 @@ jobs:
         Get-Location
         Write-Host "Directory contents:"
         Get-ChildItem
-        Write-Host "Looking for main.py:"
-        if (Test-Path "main.py") {
-          Write-Host "✅ main.py found"
+        Write-Host "Checking bot app directory:"
+        if (Test-Path "bot app") {
+          Write-Host "✅ bot app directory found"
+          Get-ChildItem "bot app" | Select-Object Name, Mode | Format-Table
         } else {
-          Write-Host "❌ main.py not found"
+          Write-Host "❌ bot app directory not found"
+        }
+        Write-Host "Looking for main.py in bot app:"
+        if (Test-Path "bot app/main.py") {
+          Write-Host "✅ bot app/main.py found"
+        } else {
+          Write-Host "❌ bot app/main.py not found"
         }
     
     - name: Install dependencies
       shell: pwsh
       run: |
+        cd "bot app"
         python -m pip install --upgrade pip
+        
+        # Install from requirements.txt if it exists
         if (Test-Path "requirements.txt") {
+          Write-Host "📦 Installing from requirements.txt"
           pip install -r requirements.txt
         } else {
           Write-Host "⚠️ requirements.txt not found, installing basic dependencies"
+          pip install flet fletx requests pydux
         }
-        pip install requests pyinstaller
+        
+        # Install PyInstaller for building executable
+        pip install pyinstaller
         Write-Host "✅ PyInstaller installed for single-file executable creation"
     
     - name: Get version info
       id: version
       shell: pwsh
       run: |
-        if (Test-Path "version.txt") {
+        cd "bot app"
+        
+        # Check for manual version input
+        $MANUAL_VERSION = "${{ github.event.inputs.version }}"
+        
+        if ($MANUAL_VERSION -and $MANUAL_VERSION -ne "") {
+          $VERSION = $MANUAL_VERSION
+          Write-Host "Using manual version: $VERSION"
+        } elseif ("${{ github.ref }}" -match "refs/tags/v(.+)") {
+          # Extract version from tag
+          $VERSION = $matches[1]
+          Write-Host "Using tag version: $VERSION"
+        } elseif (Test-Path "version.txt") {
+          # Read from version.txt
           $VERSION = Get-Content "version.txt" -Raw
           $VERSION = $VERSION.Trim()
+          Write-Host "Using version.txt: $VERSION"
         } else {
+          # Generate version from commit
           $COMMIT_HASH = git rev-parse --short HEAD
           $VERSION = "dev-$COMMIT_HASH"
+          Write-Host "Generated version: $VERSION"
         }
+        
+        # Update version.txt with the determined version
+        Set-Content -Path "version.txt" -Value $VERSION
+        Write-Host "Updated version.txt with: $VERSION"
         
         echo "version=$VERSION" >> $env:GITHUB_OUTPUT
         Write-Host "Build version: $VERSION"
         
-        $UPDATE_TYPE = "patch"
+        # Determine update type
+        if ($VERSION -match "dev-") {
+          $UPDATE_TYPE = "development"
+        } elseif ($VERSION -match "\d+\.\d+\.\d+") {
+          $UPDATE_TYPE = "release"
+        } else {
+          $UPDATE_TYPE = "patch"
+        }
+        
         echo "update_type=$UPDATE_TYPE" >> $env:GITHUB_OUTPUT
         Write-Host "Update type: $UPDATE_TYPE"
     
     - name: Build Windows EXE
       shell: pwsh
       run: |
+        
+        
         if (Test-Path "main.py") {
-          Write-Host "Building EXE from main.py using PyInstaller"
+          Write-Host "🔨 Building EXE from main.py using PyInstaller"
           
           # Create dist directory if it doesn't exist
           New-Item -ItemType Directory -Path "dist" -Force
           
           # Build single file executable with PyInstaller
-          pyinstaller --onefile --name "PatrickDisplayBot" --distpath "./dist" main.py
+          $VERSION = "${{ steps.version.outputs.version }}"
+          pyinstaller --onefile --name "PatrickDisplayBot-v$VERSION" --distpath "./dist" main.py --add-data "version.txt;." --hidden-import=flet --hidden-import=fletx
           
-          if (Test-Path "./dist/PatrickDisplayBot.exe") {
-            Write-Host "✅ EXE build successful"
-            Get-ChildItem "./dist/PatrickDisplayBot.exe" | Format-List Name, Length, LastWriteTime
+          $EXE_NAME = "PatrickDisplayBot-v$VERSION.exe"
+          if (Test-Path "./dist/$EXE_NAME") {
+            Write-Host "✅ EXE build successful: $EXE_NAME"
+            Get-ChildItem "./dist/$EXE_NAME" | Format-List Name, Length, LastWriteTime
+            
+            # Set output for later steps
+            echo "exe_name=$EXE_NAME" >> $env:GITHUB_OUTPUT
+            echo "exe_path=./dist/$EXE_NAME" >> $env:GITHUB_OUTPUT
           } else {
             Write-Host "❌ EXE build failed"
             Write-Host "Checking dist directory contents:"
             Get-ChildItem "./dist" -ErrorAction SilentlyContinue
+            Write-Host "Checking for any .exe files:"
+            Get-ChildItem "./dist/*.exe" -ErrorAction SilentlyContinue
             exit 1
           }
         } else {
-          Write-Host "❌ main.py not found"
+          Write-Host "❌ main.py not found in bot app directory"
           exit 1
         }
+      id: build
     
-    - name: Create update package
+    - name: Create source package
       id: package
       shell: pwsh
       run: |
         $VERSION = "${{ steps.version.outputs.version }}"
-        $PACKAGE_NAME = "patrick-display-bot-$VERSION.zip"
+        $PACKAGE_NAME = "patrick-display-bot-source-v$VERSION.zip"
         
-        Write-Host "Creating update package: $PACKAGE_NAME"
+        Write-Host "📦 Creating source package: $PACKAGE_NAME"
         
+        # Create temporary directory for packaging
         New-Item -ItemType Directory -Path "temp_package" -Force
-        Copy-Item -Path "*" -Destination "temp_package/" -Recurse -Exclude @("temp_package", ".git", ".github")
         
+        # Copy all files except build artifacts and git files
+        $excludePatterns = @("temp_package", ".git", ".github", "bot app/dist", "bot app/build", "*.pyc", "__pycache__")
+        
+        Get-ChildItem -Path "." -Recurse | Where-Object {
+          $item = $_
+          $shouldExclude = $false
+          foreach ($pattern in $excludePatterns) {
+            if ($item.FullName -like "*$pattern*") {
+              $shouldExclude = $true
+              break
+            }
+          }
+          -not $shouldExclude
+        } | Copy-Item -Destination { Join-Path "temp_package" $_.FullName.Substring((Get-Location).Path.Length + 1) } -Force
+        
+        # Create the zip file
         Compress-Archive -Path "temp_package/*" -DestinationPath $PACKAGE_NAME -Force
         
+        echo "package_name=$PACKAGE_NAME" >> $env:GITHUB_OUTPUT
         echo "package_path=$PACKAGE_NAME" >> $env:GITHUB_OUTPUT
+        
         $fileSize = (Get-Item $PACKAGE_NAME).Length / 1MB
-        Write-Host "Package created: $PACKAGE_NAME ($($fileSize.ToString('F2')) MB)"
+        Write-Host "✅ Source package created: $PACKAGE_NAME ($($fileSize.ToString('F2')) MB)"
     
-    - name: Upload to PocketBase
+    - name: Create GitHub Release
+      id: create_release
+      uses: actions/create-release@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        tag_name: v${{ steps.version.outputs.version }}
+        release_name: Patrick Display Bot v${{ steps.version.outputs.version }}
+        body: |
+          ## Patrick Display Bot v${{ steps.version.outputs.version }}
+          
+          ### 🚀 What's New
+          - Auto-generated release from GitHub Actions
+          - Single-file executable for easy deployment
+          - Enhanced signal handling and error management
+          
+          ### 📦 Downloads
+          - **Windows Executable**: `${{ steps.build.outputs.exe_name }}` - Ready to run standalone application
+          - **Source Code**: `${{ steps.package.outputs.package_name }}` - Full source code package
+          
+          ### 🔧 Installation
+          1. Download the `.exe` file
+          2. Run directly - no installation required
+          3. The application will create necessary files on first run
+          
+          ### 📋 Requirements
+          - Windows 10/11 (64-bit)
+          - No additional dependencies required
+          
+          ### 🐛 Bug Fixes
+          - Fixed signal handler threading issues
+          - Improved error handling and logging
+          
+          ---
+          **Build Info:**
+          - Build Type: ${{ steps.version.outputs.update_type }}
+          - Build Date: ${{ github.event.head_commit.timestamp }}
+          - Commit: ${{ github.sha }}
+        draft: false
+        prerelease: ${{ steps.version.outputs.update_type == 'development' }}
+    
+    - name: Upload EXE to Release
+      uses: actions/upload-release-asset@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ steps.create_release.outputs.upload_url }}
+        asset_path: bot app/${{ steps.build.outputs.exe_path }}
+        asset_name: ${{ steps.build.outputs.exe_name }}
+        asset_content_type: application/octet-stream
+    
+    - name: Upload Source Package to Release
+      uses: actions/upload-release-asset@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ steps.create_release.outputs.upload_url }}
+        asset_path: ${{ steps.package.outputs.package_path }}
+        asset_name: ${{ steps.package.outputs.package_name }}
+        asset_content_type: application/zip
+    
+    - name: Upload to PocketBase (Optional)
       shell: pwsh
       run: |
-        Write-Host "🚀 Uploading update package to PocketBase..."
+        Write-Host "🚀 Preparing PocketBase upload..."
         
         $VERSION = "${{ steps.version.outputs.version }}"
         $UPDATE_TYPE = "${{ steps.version.outputs.update_type }}"
+        $EXE_PATH = "bot app/${{ steps.build.outputs.exe_path }}"
         $PACKAGE_PATH = "${{ steps.package.outputs.package_path }}"
+        $DOWNLOAD_URL = "${{ steps.create_release.outputs.html_url }}"
         
-        # Create update record in PocketBase (implement this based on your PocketBase schema)
-        Write-Host "Update package ready for deployment: $PACKAGE_PATH"
         Write-Host "Version: $VERSION"
         Write-Host "Type: $UPDATE_TYPE"
+        Write-Host "EXE Path: $EXE_PATH"
+        Write-Host "Package Path: $PACKAGE_PATH"
+        Write-Host "Release URL: $DOWNLOAD_URL"
+        
+        # TODO: Implement PocketBase upload logic here
+        # Example PocketBase API call structure:
+        # $headers = @{
+        #     "Content-Type" = "application/json"
+        #     "Authorization" = "Bearer $POCKETBASE_TOKEN"
+        # }
+        # $body = @{
+        #     version = $VERSION
+        #     update_type = $UPDATE_TYPE
+        #     download_url = $DOWNLOAD_URL
+        #     release_notes = "Auto-generated release"
+        # } | ConvertTo-Json
+        # 
+        # Invoke-RestMethod -Uri "$env:POCKETBASE_URL/api/collections/updates/records" -Method POST -Headers $headers -Body $body
+        
+        Write-Host "✅ PocketBase upload prepared (implement API calls as needed)"
     
-    - name: Notify success
+    - name: Notify Success
       shell: pwsh
       run: |
-        Write-Host "🎉 Windows bot update package created successfully!"
+        Write-Host "🎉 Release created successfully!"
         Write-Host "Version: ${{ steps.version.outputs.version }}"
-        Write-Host "Package: ${{ steps.package.outputs.package_path }}" 
+        Write-Host "EXE: ${{ steps.build.outputs.exe_name }}"
+        Write-Host "Source: ${{ steps.package.outputs.package_name }}"
+        Write-Host "Release URL: ${{ steps.create_release.outputs.html_url }}"
+        Write-Host ""
+        Write-Host "📥 Users can now download:"
+        Write-Host "- Windows EXE: Direct download and run"
+        Write-Host "- Source Code: For developers and custom builds" 
