@@ -102,6 +102,7 @@ class AdvancedCyclesTrader(Strategy):
         self.reversal_threshold_pips = float(config.get("reversal_threshold_pips", 300.0))
         self.cycle_interval = float(config.get("cycle_interval_pips", 100.0))
         self.initial_order_stop_loss = float(config.get("initial_order_stop_loss_pips", 300.0))
+        self.zone_range_pips = int(config.get("zone_range_pips", 50))
         
     def _initialize_advanced_components(self):
         """Initialize advanced trading components"""
