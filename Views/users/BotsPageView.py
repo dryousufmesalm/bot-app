@@ -57,6 +57,43 @@ class BotsPageView(Xview):
                 )
             )
 
+        # Get current version for display
+        state = store.get_state()
+        bot_instance = state.get('bot_instance')
+        current_version = bot_instance.current_version if bot_instance else "Unknown"
+
+        # Manual update check button
+        def check_updates(e):
+            """Handle manual update check"""
+            try:
+                if hasattr(self.page, 'check_for_updates'):
+                    self.page.check_for_updates()
+                else:
+                    # Fallback: show message
+                    self.page.show_snack_bar(
+                        flet.SnackBar(
+                            content=flet.Text("Auto-updater not available"),
+                            bgcolor=flet.Colors.ORANGE
+                        )
+                    )
+            except Exception as ex:
+                app_logger.error(f"Error checking for updates: {ex}")
+                self.page.show_snack_bar(
+                    flet.SnackBar(
+                        content=flet.Text(f"Update check failed: {str(ex)}"),
+                        bgcolor=flet.Colors.RED
+                    )
+                )
+
+        update_button = flet.ElevatedButton(
+            text=f"🔄 Check for Updates (v{current_version})",
+            on_click=check_updates,
+            expand=False,
+            width=300,
+            color=flet.Colors.BLUE,
+            icon=flet.Icons.UPDATE
+        )
+
         back_button = flet.Button(
             text="< back",
             on_click=lambda e: self.back(),
@@ -81,15 +118,28 @@ class BotsPageView(Xview):
             ),
             text_align=flet.TextAlign.CENTER,
         )
+
+        # Version info text
+        version_info = flet.Text(
+            value=f"Patrick Display Bot v{current_version}",
+            style=flet.TextStyle(
+                size=14,
+                color=flet.Colors.ON_SURFACE_VARIANT,
+            ),
+            text_align=flet.TextAlign.CENTER,
+        )
         
         return flet.View(
             horizontal_alignment=flet.CrossAxisAlignment.CENTER,
             vertical_alignment=flet.MainAxisAlignment.CENTER,
             controls=[
                 headline,
+                version_info,
                 launch_metatrader,
                 Bots_headline,
                 *bots_buttons,
+                flet.Divider(),
+                update_button,
                 back_button,
             ]
         )
