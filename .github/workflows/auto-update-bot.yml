@@ -4,7 +4,7 @@ on:
   push:
     branches: [ main, develop ]
     paths: 
-      - 'bot app/**'
+      - '**'
   release:
     types: [published]
 
@@ -36,28 +36,30 @@ jobs:
         Get-Location
         Write-Host "Directory contents:"
         Get-ChildItem
-        Write-Host "Looking for bot app directory:"
-        if (Test-Path "bot app") {
-          Write-Host "✅ 'bot app' directory found"
-          Get-ChildItem "bot app" | Select-Object Name
+        Write-Host "Looking for main.py:"
+        if (Test-Path "main.py") {
+          Write-Host "✅ main.py found"
         } else {
-          Write-Host "❌ 'bot app' directory not found"
+          Write-Host "❌ main.py not found"
         }
     
     - name: Install dependencies
       shell: pwsh
       run: |
         python -m pip install --upgrade pip
-        Set-Location "bot app"
-        pip install -r requirements.txt
-        pip install requests pyinstaller
+        if (Test-Path "requirements.txt") {
+          pip install -r requirements.txt
+        } else {
+          Write-Host "⚠️ requirements.txt not found, installing basic dependencies"
+        }
+        pip install requests pyinstaller flet
     
     - name: Get version info
       id: version
       shell: pwsh
       run: |
-        if (Test-Path "bot app/version.txt") {
-          $VERSION = Get-Content "bot app/version.txt" -Raw
+        if (Test-Path "version.txt") {
+          $VERSION = Get-Content "version.txt" -Raw
           $VERSION = $VERSION.Trim()
         } else {
           $COMMIT_HASH = git rev-parse --short HEAD
@@ -74,14 +76,19 @@ jobs:
     - name: Build Windows EXE
       shell: pwsh
       run: |
-        Set-Location "bot app"
-        flet pack main.py --name "PatrickDisplayBot" --product-name "Patrick Display Bot"
-        
-        if (Test-Path "./dist/PatrickDisplayBot.exe") {
-          Write-Host "✅ EXE build successful"
-          Get-ChildItem "./dist/PatrickDisplayBot.exe" | Format-List Name, Length
+        if (Test-Path "main.py") {
+          Write-Host "Building EXE from main.py"
+          flet pack main.py --name "PatrickDisplayBot" --product-name "Patrick Display Bot"
+          
+          if (Test-Path "./dist/PatrickDisplayBot.exe") {
+            Write-Host "✅ EXE build successful"
+            Get-ChildItem "./dist/PatrickDisplayBot.exe" | Format-List Name, Length
+          } else {
+            Write-Host "❌ EXE build failed"
+            exit 1
+          }
         } else {
-          Write-Host "❌ EXE build failed"
+          Write-Host "❌ main.py not found"
           exit 1
         }
     
@@ -95,15 +102,27 @@ jobs:
         Write-Host "Creating update package: $PACKAGE_NAME"
         
         New-Item -ItemType Directory -Path "temp_package" -Force
-        Copy-Item -Path "bot app" -Destination "temp_package/" -Recurse
-        New-Item -ItemType Directory -Path "temp_package/bot app/dist" -Force
-        Copy-Item -Path "bot app/dist/PatrickDisplayBot.exe" -Destination "temp_package/bot app/dist/"
+        Copy-Item -Path "*" -Destination "temp_package/" -Recurse -Exclude @("temp_package", ".git", ".github")
         
         Compress-Archive -Path "temp_package/*" -DestinationPath $PACKAGE_NAME -Force
         
         echo "package_path=$PACKAGE_NAME" >> $env:GITHUB_OUTPUT
         $fileSize = (Get-Item $PACKAGE_NAME).Length / 1MB
         Write-Host "Package created: $PACKAGE_NAME ($($fileSize.ToString('F2')) MB)"
+    
+    - name: Upload to PocketBase
+      shell: pwsh
+      run: |
+        Write-Host "🚀 Uploading update package to PocketBase..."
+        
+        $VERSION = "${{ steps.version.outputs.version }}"
+        $UPDATE_TYPE = "${{ steps.version.outputs.update_type }}"
+        $PACKAGE_PATH = "${{ steps.package.outputs.package_path }}"
+        
+        # Create update record in PocketBase (implement this based on your PocketBase schema)
+        Write-Host "Update package ready for deployment: $PACKAGE_PATH"
+        Write-Host "Version: $VERSION"
+        Write-Host "Type: $UPDATE_TYPE"
     
     - name: Notify success
       shell: pwsh
