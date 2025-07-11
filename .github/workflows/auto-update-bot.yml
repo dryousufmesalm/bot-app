@@ -52,7 +52,8 @@ jobs:
         } else {
           Write-Host "⚠️ requirements.txt not found, installing basic dependencies"
         }
-        pip install requests pyinstaller flet
+        pip install requests pyinstaller
+        Write-Host "✅ PyInstaller installed for single-file executable creation"
     
     - name: Get version info
       id: version
@@ -77,14 +78,21 @@ jobs:
       shell: pwsh
       run: |
         if (Test-Path "main.py") {
-          Write-Host "Building EXE from main.py"
-          flet pack main.py --name "PatrickDisplayBot" --product-name "Patrick Display Bot"
+          Write-Host "Building EXE from main.py using PyInstaller"
+          
+          # Create dist directory if it doesn't exist
+          New-Item -ItemType Directory -Path "dist" -Force
+          
+          # Build single file executable with PyInstaller
+          pyinstaller --onefile --name "PatrickDisplayBot" --distpath "./dist" main.py
           
           if (Test-Path "./dist/PatrickDisplayBot.exe") {
             Write-Host "✅ EXE build successful"
-            Get-ChildItem "./dist/PatrickDisplayBot.exe" | Format-List Name, Length
+            Get-ChildItem "./dist/PatrickDisplayBot.exe" | Format-List Name, Length, LastWriteTime
           } else {
             Write-Host "❌ EXE build failed"
+            Write-Host "Checking dist directory contents:"
+            Get-ChildItem "./dist" -ErrorAction SilentlyContinue
             exit 1
           }
         } else {
