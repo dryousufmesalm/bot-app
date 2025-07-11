@@ -41,12 +41,12 @@ jobs:
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
-        tag_name: v2.0
-        release_name: Patrick v2.0
+        tag_name: v2.1
+        release_name: Patrick v2.1
         prerelease: false
         draft: false
         body: |
-          ## Patrick Display v2.0 Release Notes
+          ## Patrick Display v2.1 Release Notes
           
           ### 🚀 New Features
           - Enhanced real-time trading data visualization
