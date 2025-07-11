@@ -21,8 +21,8 @@ permissions:
 
 env:
   POCKETBASE_URL: ${{ secrets.POCKETBASE_URL }}
-  POCKETBASE_ADMIN_EMAIL: ${{ secrets.POCKETBASE_ADMIN_EMAIL }}
-  POCKETBASE_ADMIN_PASSWORD: ${{ secrets.POCKETBASE_ADMIN_PASSWORD }}
+  POCKETBASE_EMAIL: ${{ secrets.POCKETBASE_EMAIL }}
+  POCKETBASE_PASSWORD: ${{ secrets.POCKETBASE_PASSWORD }}
 
 jobs:
   build_and_test:
@@ -43,18 +43,18 @@ jobs:
       id: version
       shell: pwsh
       run: |
-        if (Test-Path "version.txt") {
-          $version = Get-Content "version.txt" -Raw
+        if (Test-Path "bot app/version.txt") {
+          $version = Get-Content "bot app/version.txt" -Raw
           $version = $version.Trim()
         } elseif ("${{ github.event.inputs.version }}" -ne "") {
           $version = "${{ github.event.inputs.version }}"
-          $version | Out-File -FilePath "version.txt" -Encoding utf8 -NoNewline
+          $version | Out-File -FilePath "bot app/version.txt" -Encoding utf8 -NoNewline
         } elseif ("${{ github.ref_type }}" -eq "tag") {
           $version = "${{ github.ref_name }}" -replace '^v', ''
-          $version | Out-File -FilePath "version.txt" -Encoding utf8 -NoNewline
+          $version | Out-File -FilePath "bot app/version.txt" -Encoding utf8 -NoNewline
         } else {
           $version = "1.0.${{ github.run_number }}"
-          $version | Out-File -FilePath "version.txt" -Encoding utf8 -NoNewline
+          $version | Out-File -FilePath "bot app/version.txt" -Encoding utf8 -NoNewline
         }
         Write-Host "Version: $version"
         echo "version=$version" >> $env:GITHUB_OUTPUT
@@ -62,11 +62,14 @@ jobs:
 
     - name: Install Dependencies 
       run: |
+        python -m pip install --upgrade pip
+        cd "bot app"
         pip install -r requirements.txt
     
     - name: Build EXE with Flet
       run: |
         Write-Host "🔨 Building EXE with Flet..."
+        cd "bot app"
         flet pack main.py --name "PatrickDisplayBot-v${{ steps.version.outputs.version }}" --distpath "./dist"
         
         # Verify the build
@@ -86,14 +89,14 @@ jobs:
       uses: actions/upload-artifact@v4
       with:
         name: patrick-display-bot-v${{ steps.version.outputs.version }}
-        path: ./dist/PatrickDisplayBot-v${{ steps.version.outputs.version }}.exe
+        path: "bot app/dist/PatrickDisplayBot-v${{ steps.version.outputs.version }}.exe"
         retention-days: 30
       
     - name: Create GitHub Release
       id: github_release
       shell: pwsh
       env:
-        GITHUB_TOKEN: ${{ secrets.TOKEN }}
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       run: |
         # Check if tag exists, if not create it
         $tagExists = git tag -l "${{ steps.version.outputs.tag }}"
@@ -103,6 +106,8 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git tag "${{ steps.version.outputs.tag }}"
           git push origin "${{ steps.version.outputs.tag }}"
+        } else {
+          Write-Host "Tag ${{ steps.version.outputs.tag }} already exists, skipping creation"
         }
         
         # Create release notes
@@ -142,13 +147,23 @@ jobs:
         
         $releaseNotes | Out-File -FilePath "release-notes.md" -Encoding utf8
         
-        # Create release using gh CLI
+        # Create release using gh CLI - check if release already exists
+        try {
+          $existingRelease = gh release view "${{ steps.version.outputs.tag }}" --json id 2>$null
+          if ($existingRelease) {
+            Write-Host "Release already exists, deleting it first..."
+            gh release delete "${{ steps.version.outputs.tag }}" --yes
+          }
+        } catch {
+          Write-Host "No existing release found, proceeding with creation..."
+        }
+        
         Write-Host "Creating GitHub release..."
         gh release create "${{ steps.version.outputs.tag }}" `
           --title "Patrick Display Bot v${{ steps.version.outputs.version }}" `
           --notes-file "release-notes.md" `
           --latest `
-          "./bot app/dist/PatrickDisplayBot-v${{ steps.version.outputs.version }}.exe#Windows Executable"
+          "bot app/dist/PatrickDisplayBot-v${{ steps.version.outputs.version }}.exe#Windows Executable"
         
         Write-Host "✅ GitHub release created successfully!"
         
@@ -165,21 +180,21 @@ jobs:
         Write-Host "🚀 Uploading release info to PocketBase..."
         
         # Check if PocketBase credentials are available
-        if (-not $env:POCKETBASE_URL -or -not $env:POCKETBASE_ADMIN_EMAIL -or -not $env:POCKETBASE_ADMIN_PASSWORD) {
+        if (-not $env:POCKETBASE_URL -or -not $env:POCKETBASE_EMAIL -or -not $env:POCKETBASE_PASSWORD) {
           Write-Host "⚠️ PocketBase credentials not found in secrets - skipping upload"
           Write-Host "To enable PocketBase upload, add these secrets to your repository:"
           Write-Host "- POCKETBASE_URL"
-          Write-Host "- POCKETBASE_ADMIN_EMAIL" 
-          Write-Host "- POCKETBASE_ADMIN_PASSWORD"
+          Write-Host "- POCKETBASE_EMAIL" 
+          Write-Host "- POCKETBASE_PASSWORD"
           exit 0
         }
         
         try {
-          # Authenticate with PocketBase admin
+          # Authenticate with PocketBase
           Write-Host "🔐 Authenticating with PocketBase..."
           $authBody = @{
-            identity = $env:POCKETBASE_ADMIN_EMAIL
-            password = $env:POCKETBASE_ADMIN_PASSWORD
+            identity = $env:POCKETBASE_EMAIL
+            password = $env:POCKETBASE_PASSWORD
           } | ConvertTo-Json
           
           $authResponse = Invoke-RestMethod -Uri "$env:POCKETBASE_URL/api/users/auth-with-password" -Method POST -Body $authBody -ContentType "application/json"
