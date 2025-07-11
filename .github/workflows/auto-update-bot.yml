@@ -1,27 +1,23 @@
-name: Auto Update Bot
+name: Build EXE
 
 on:
   push:
+    branches:
+      - main
     tags:
-      - 'v*'  # Trigger on version tags like v1.0.72
-    branches: [ main, develop ]
-    paths: 
-      - '**'
-  release:
-    types: [published]
-  workflow_dispatch:  # Allow manual triggering
+      - 'v*'
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
     inputs:
       version:
-        description: 'Version number (e.g., 1.0.72)'
+        description: 'Version number (e.g., 1.0.75)'
         required: false
         default: ''
 
-# Add proper permissions for creating releases
 permissions:
   contents: write
-  packages: write
-  actions: read
-  security-events: write
 
 env:
   POCKETBASE_URL: ${{ secrets.POCKETBASE_URL }}
@@ -29,21 +25,20 @@ env:
   POCKETBASE_ADMIN_PASSWORD: ${{ secrets.POCKETBASE_ADMIN_PASSWORD }}
 
 jobs:
-  build-and-release:
+  build_and_test:
     runs-on: windows-latest
     
     steps:
-    - name: Checkout code
+    - name: Checkout repository
       uses: actions/checkout@v4
-      with:
-        fetch-depth: 0
-    
+
     - name: Set up Python 3.13.0
-      uses: actions/setup-python@v4
+      uses: actions/setup-python@v5
       with:
         python-version: '3.13.0'
+        architecture: 'x64'
         cache: 'pip'
-    
+
     - name: Get version number
       id: version
       shell: pwsh
@@ -58,73 +53,60 @@ jobs:
           $version = "${{ github.ref_name }}" -replace '^v', ''
           $version | Out-File -FilePath "version.txt" -Encoding utf8 -NoNewline
         } else {
-          $version = "1.0.72"
+          $version = "1.0.${{ github.run_number }}"
           $version | Out-File -FilePath "version.txt" -Encoding utf8 -NoNewline
         }
         Write-Host "Version: $version"
         echo "version=$version" >> $env:GITHUB_OUTPUT
         echo "tag=v$version" >> $env:GITHUB_OUTPUT
-    
-    - name: Install dependencies
+
+    - name: Install Dependencies 
       run: |
         python -m pip install --upgrade pip
-        pip install pyinstaller
         pip install -r requirements.txt
     
-    - name: Create virtual environment and install dependencies
-      shell: pwsh
+    - name: Build EXE with Flet
       run: |
-        python -m venv venv
-        .\venv\Scripts\Activate.ps1
-        python -m pip install --upgrade pip
-        pip install pyinstaller
-        if (Test-Path "requirements.txt") {
-          pip install -r requirements.txt
-        }
-        Write-Host "✅ Dependencies installed successfully"
-    
-    - name: Build executable with PyInstaller
-      shell: pwsh
-      run: |
-        .\venv\Scripts\Activate.ps1
-        Write-Host "🔨 Building executable..."
-        
-        # Create dist directory if it doesn't exist
-        if (-not (Test-Path "dist")) {
-          New-Item -ItemType Directory -Path "dist"
-        }
-        
-        # Build with PyInstaller
-        pyinstaller --onefile --name "PatrickDisplayBot-v${{ steps.version.outputs.version }}" --distpath "./dist" main.py
+        Write-Host "🔨 Building EXE with Flet..."
+        flet pack main.py --name "PatrickDisplayBot-v${{ steps.version.outputs.version }}" --distpath "./dist"
         
         # Verify the build
-        if (Test-Path "dist/PatrickDisplayBot-v${{ steps.version.outputs.version }}.exe") {
-          Write-Host "✅ Build successful!"
-          $fileSize = (Get-Item "dist/PatrickDisplayBot-v${{ steps.version.outputs.version }}.exe").Length
+        $exeName = "PatrickDisplayBot-v${{ steps.version.outputs.version }}.exe"
+        if (Test-Path "./dist/$exeName") {
+          Write-Host "✅ Build successful: $exeName"
+          $fileSize = (Get-Item "./dist/$exeName").Length
           Write-Host "📦 File size: $([math]::Round($fileSize/1MB, 2)) MB"
         } else {
-          Write-Host "❌ Build failed - executable not found"
+          Write-Host "❌ Build failed - checking for any exe files..."
+          Get-ChildItem "./dist" -Filter "*.exe" -ErrorAction SilentlyContinue
           exit 1
         }
-    
-    - name: Verify executable
       shell: pwsh
+
+    - name: Upload EXE Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: patrick-display-bot-v${{ steps.version.outputs.version }}
+        path: ./dist/PatrickDisplayBot-v${{ steps.version.outputs.version }}.exe
+        retention-days: 30
+      
+    - name: Create GitHub Release
+      id: github_release
+      shell: pwsh
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       run: |
-        $exePath = "dist/PatrickDisplayBot-v${{ steps.version.outputs.version }}.exe"
-        if (Test-Path $exePath) {
-          Write-Host "✅ Executable found: $exePath"
-          $fileInfo = Get-Item $exePath
-          Write-Host "📦 Size: $([math]::Round($fileInfo.Length/1MB, 2)) MB"
-          Write-Host "📅 Created: $($fileInfo.CreationTime)"
-        } else {
-          Write-Host "❌ Executable not found!"
-          Get-ChildItem -Path "dist" -Recurse
-          exit 1
+        # Check if tag exists, if not create it
+        $tagExists = git tag -l "${{ steps.version.outputs.tag }}"
+        if (-not $tagExists) {
+          Write-Host "Creating tag ${{ steps.version.outputs.tag }}..."
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag "${{ steps.version.outputs.tag }}"
+          git push origin "${{ steps.version.outputs.tag }}"
         }
-    
-    - name: Create Release Notes
-      shell: pwsh
-      run: |
+        
+        # Create release notes
         $releaseNotes = @"
         ## 🚀 Patrick Display Bot v${{ steps.version.outputs.version }}
         
@@ -154,27 +136,12 @@ jobs:
         ---
         **Build Info:**
         - Build Date: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss UTC')
+        - Build Number: ${{ github.run_number }}
         - Commit: ${{ github.sha }}
         - Python Version: 3.13.0
         "@
         
         $releaseNotes | Out-File -FilePath "release-notes.md" -Encoding utf8
-        Write-Host "✅ Release notes created"
-    
-    - name: Create GitHub Release
-      shell: pwsh
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      run: |
-        # Check if tag exists, if not create it
-        $tagExists = git tag -l "${{ steps.version.outputs.tag }}"
-        if (-not $tagExists) {
-          Write-Host "Creating tag ${{ steps.version.outputs.tag }}..."
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git tag "${{ steps.version.outputs.tag }}"
-          git push origin "${{ steps.version.outputs.tag }}"
-        }
         
         # Create release using gh CLI
         Write-Host "Creating GitHub release..."
@@ -182,18 +149,88 @@ jobs:
           --title "Patrick Display Bot v${{ steps.version.outputs.version }}" `
           --notes-file "release-notes.md" `
           --latest `
-          "dist/PatrickDisplayBot-v${{ steps.version.outputs.version }}.exe#Windows Executable"
+          "./dist/PatrickDisplayBot-v${{ steps.version.outputs.version }}.exe#Windows Executable"
         
         Write-Host "✅ GitHub release created successfully!"
-    
-    - name: Upload Build Artifacts
-      uses: actions/upload-artifact@v3
-      with:
-        name: patrick-display-bot-v${{ steps.version.outputs.version }}
-        path: |
-          dist/PatrickDisplayBot-v${{ steps.version.outputs.version }}.exe
-          release-notes.md
-        retention-days: 30
+        
+        # Set output for PocketBase upload
+        $releaseUrl = "https://github.com/${{ github.repository }}/releases/tag/${{ steps.version.outputs.tag }}"
+        $downloadUrl = "https://github.com/${{ github.repository }}/releases/download/${{ steps.version.outputs.tag }}/PatrickDisplayBot-v${{ steps.version.outputs.version }}.exe"
+        
+        echo "release_url=$releaseUrl" >> $env:GITHUB_OUTPUT
+        echo "download_url=$downloadUrl" >> $env:GITHUB_OUTPUT
+
+    - name: Upload to PocketBase
+      shell: pwsh
+      run: |
+        Write-Host "🚀 Uploading release info to PocketBase..."
+        
+        # Check if PocketBase credentials are available
+        if (-not $env:POCKETBASE_URL -or -not $env:POCKETBASE_ADMIN_EMAIL -or -not $env:POCKETBASE_ADMIN_PASSWORD) {
+          Write-Host "⚠️ PocketBase credentials not found in secrets - skipping upload"
+          Write-Host "To enable PocketBase upload, add these secrets to your repository:"
+          Write-Host "- POCKETBASE_URL"
+          Write-Host "- POCKETBASE_ADMIN_EMAIL" 
+          Write-Host "- POCKETBASE_ADMIN_PASSWORD"
+          exit 0
+        }
+        
+        try {
+          # Authenticate with PocketBase admin
+          Write-Host "🔐 Authenticating with PocketBase..."
+          $authBody = @{
+            identity = $env:POCKETBASE_ADMIN_EMAIL
+            password = $env:POCKETBASE_ADMIN_PASSWORD
+          } | ConvertTo-Json
+          
+          $authResponse = Invoke-RestMethod -Uri "$env:POCKETBASE_URL/api/admins/auth-with-password" -Method POST -Body $authBody -ContentType "application/json"
+          $token = $authResponse.token
+          Write-Host "✅ PocketBase authentication successful"
+          
+          # Prepare release data
+          $releaseData = @{
+            version = "${{ steps.version.outputs.version }}"
+            tag = "${{ steps.version.outputs.tag }}"
+            release_url = "${{ steps.github_release.outputs.release_url }}"
+            download_url = "${{ steps.github_release.outputs.download_url }}"
+            build_number = "${{ github.run_number }}"
+            commit_sha = "${{ github.sha }}"
+            build_date = (Get-Date -Format "yyyy-MM-ddTHH:mm:ssZ")
+            platform = "windows"
+            file_name = "PatrickDisplayBot-v${{ steps.version.outputs.version }}.exe"
+            release_notes = "Auto-generated release from GitHub Actions"
+            status = "published"
+          } | ConvertTo-Json
+          
+          # Upload to PocketBase (adjust collection name as needed)
+          Write-Host "📤 Uploading release data to PocketBase..."
+          $headers = @{
+            "Authorization" = "Bearer $token"
+            "Content-Type" = "application/json"
+          }
+          
+          $uploadResponse = Invoke-RestMethod -Uri "$env:POCKETBASE_URL/api/collections/releases/records" -Method POST -Body $releaseData -Headers $headers
+          
+          Write-Host "✅ Successfully uploaded to PocketBase!"
+          Write-Host "📋 Record ID: $($uploadResponse.id)"
+          Write-Host "🔗 Release URL: ${{ steps.github_release.outputs.release_url }}"
+          Write-Host "📥 Download URL: ${{ steps.github_release.outputs.download_url }}"
+          
+        } catch {
+          Write-Host "❌ Failed to upload to PocketBase: $($_.Exception.Message)"
+          Write-Host "🔍 Error details: $($_.Exception.Response.StatusCode) - $($_.Exception.Response.StatusDescription)"
+          
+          # Try to get more error details
+          if ($_.Exception.Response) {
+            $errorStream = $_.Exception.Response.GetResponseStream()
+            $reader = New-Object System.IO.StreamReader($errorStream)
+            $errorBody = $reader.ReadToEnd()
+            Write-Host "📝 Error body: $errorBody"
+          }
+          
+          Write-Host "⚠️ PocketBase upload failed, but GitHub release was successful"
+          # Don't fail the entire workflow if PocketBase upload fails
+        }
     
     - name: Build Summary
       shell: pwsh
@@ -208,4 +245,7 @@ jobs:
         Write-Host "🔗 Download your release at:"
         Write-Host "   https://github.com/${{ github.repository }}/releases/tag/${{ steps.version.outputs.tag }}"
         Write-Host ""
-        Write-Host "✅ The executable is now available for download!" 
+        Write-Host "✅ The executable is now available for download!"
+        if ($env:POCKETBASE_URL) {
+          Write-Host "📤 Release info uploaded to PocketBase server"
+        } 
