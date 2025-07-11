@@ -1,7 +1,7 @@
 from __future__ import absolute_import
 
 from helpers.action_types import (
-    ADD_USER, ADD_ACCOUNT, DISPATCH_IN_MIDDLE, THROW_ERROR, GET_USER, ADD_MT5
+    ADD_USER, ADD_ACCOUNT, DISPATCH_IN_MIDDLE, THROW_ERROR, GET_USER, ADD_MT5, SET_BOT_INSTANCE
 )
 
 
@@ -82,8 +82,24 @@ def error_throwing_reducer(state=None, action={}):
         return state
 
 
+def bot_instance(state=None, action={}):
+    if state is None:
+        state = {
+            'bot_instance': None
+        }
+    
+    if action.get('type') == SET_BOT_INSTANCE:
+        payload = action.get('payload')
+        return {
+            'bot_instance': payload['bot_instance']
+        }
+    
+    return state
+
+
 reducers = {
     'users': users,
     'dispatch_in_middle_of_reducer': dispatch_in_middle_of_reducer,
     'error_throwing_reducer': error_throwing_reducer,
+    'bot_instance': bot_instance,
 }

@@ -1,7 +1,7 @@
 from __future__ import absolute_import
 from helpers.store import store
 from helpers.action_types import (
-    DISPATCH_IN_MIDDLE, THROW_ERROR, UNKNOWN_ACTION, ADD_ACCOUNT, ADD_USER, ADD_MT5
+    DISPATCH_IN_MIDDLE, THROW_ERROR, UNKNOWN_ACTION, ADD_ACCOUNT, ADD_USER, ADD_MT5, SET_BOT_INSTANCE
 )
 
 
@@ -88,4 +88,13 @@ def throw_error():
 def unknown_action():
     return {
         'type': UNKNOWN_ACTION,
+    }
+
+
+def set_bot_instance(bot_instance):
+    return {
+        'type': SET_BOT_INSTANCE,
+        'payload': {
+            'bot_instance': bot_instance
+        }
     }

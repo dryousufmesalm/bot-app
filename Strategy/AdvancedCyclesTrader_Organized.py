@@ -2901,21 +2901,21 @@ class AdvancedCyclesTrader(Strategy):
             initial_direction = recovery_data['initial_direction']
             stop_loss_price = recovery_data['initial_stop_loss_price']
             
-            # Calculate reversal threshold from initial stop loss price
+            # Calculate zone range distance from initial stop loss price using zone_range_pips
             pip_value = self._get_pip_value()
-            reversal_distance_points = self.reversal_threshold_pips * pip_value
+            zone_range_distance_points = self.zone_range_pips * pip_value
             
             if initial_direction == "BUY":
-                # For BUY: activate when price drops reversal_threshold_pips below stop loss
-                activation_price = stop_loss_price - reversal_distance_points
+                # For BUY: activate when price drops zone_range_pips below stop loss
+                activation_price = stop_loss_price - zone_range_distance_points
                 should_activate = current_price <= activation_price
             else:  # SELL
-                # For SELL: activate when price rises reversal_threshold_pips above stop loss
-                activation_price = stop_loss_price + reversal_distance_points
+                # For SELL: activate when price rises zone_range_pips above stop loss
+                activation_price = stop_loss_price + zone_range_distance_points
                 should_activate = current_price >= activation_price
             
             if should_activate:
-                logger.info(f"Recovery zone activation triggered at {current_price} (threshold: {activation_price})")
+                logger.info(f"Recovery zone activation triggered at {current_price} (threshold: {activation_price}) using zone_range_pips: {self.zone_range_pips}")
             
             return should_activate
             

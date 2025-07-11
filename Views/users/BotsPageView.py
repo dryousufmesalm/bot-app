@@ -59,7 +59,8 @@ class BotsPageView(Xview):
 
         # Get current version for display
         state = store.get_state()
-        bot_instance = state.get('bot_instance')
+        bot_instance_state = state.get('bot_instance', {})
+        bot_instance = bot_instance_state.get('bot_instance')
         current_version = bot_instance.current_version if bot_instance else "Unknown"
 
         # Manual update check button
