@@ -146,7 +146,7 @@ jobs:
           # Authenticate with PocketBase (using admin auth endpoint)
           Write-Host "🔐 Authenticating with PocketBase..."
           $authBody = @{
-            email = $env:POCKETBASE_ADMIN_EMAIL
+            identity = $env:POCKETBASE_ADMIN_EMAIL
             password = $env:POCKETBASE_ADMIN_PASSWORD
           } | ConvertTo-Json
           
