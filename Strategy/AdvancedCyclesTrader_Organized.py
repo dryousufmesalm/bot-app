@@ -1172,48 +1172,45 @@ class AdvancedCyclesTrader(Strategy):
         return None
 
     def _remove_cycle_from_active(self, cycle):
-        """Remove cycle from active cycles list and clean up references"""
+        """Remove a cycle from active management"""
         try:
-            # Remove from active cycles list
+            logger.info(f"Removing cycle {cycle.cycle_id} from active management")
             if cycle in self.active_cycles:
                 self.active_cycles.remove(cycle)
-                logger.debug(f"Removed cycle {cycle.cycle_id} from active cycles")
-            
-            # Remove from cycles dictionary
-            if hasattr(cycle, 'cycle_id') and cycle.cycle_id in self.cycles:
+                logger.info(f"Removed cycle from active_cycles list")
+            if cycle.cycle_id in self.cycles:
                 del self.cycles[cycle.cycle_id]
-                logger.debug(f"Removed cycle {cycle.cycle_id} from cycles dictionary")
+                logger.info(f"Removed cycle from cycles dictionary")
             
-            # Move to closed cycles (optional, for tracking)
-            if cycle not in self.closed_cycles:
-                self.closed_cycles.append(cycle)
-                
-            # Update statistics
+            # Update loss tracker
             self.loss_tracker['active_cycles_count'] = len(self.active_cycles)
-            
-            logger.info(f"Cycle {cycle.cycle_id} removed from active management")
+            self.loss_tracker['updated_at'] = datetime.datetime.now()
+            logger.info(f"Updated loss tracker. Active cycles count: {self.loss_tracker['active_cycles_count']}")
             
         except Exception as e:
-            logger.error(f"Error removing cycle from active: {e}")
+            logger.error(f"Error removing cycle from active management: {e}")
 
     def _cleanup_closed_cycles(self):
         """Clean up closed cycles from active management"""
         try:
+            logger.info(f"Starting cycle cleanup. Current active cycles: {len(self.active_cycles)}")
             cycles_to_remove = []
             
             # Find cycles that should be removed
             for cycle in self.active_cycles:
+                logger.debug(f"Checking cycle {cycle.cycle_id} - closed={getattr(cycle, 'is_closed', False)}, active={getattr(cycle, 'is_active', True)}")
                 if (hasattr(cycle, 'is_closed') and cycle.is_closed) or \
-                   (hasattr(cycle, 'is_active') and not cycle.is_active) :
+                   (hasattr(cycle, 'is_active') and not cycle.is_active):
                     cycles_to_remove.append(cycle)
                     logger.info(f"Marking cycle {cycle.cycle_id} for removal: closed={getattr(cycle, 'is_closed', False)}, active={getattr(cycle, 'is_active', True)}, active_orders={len(getattr(cycle, 'active_orders', []))}")
             
             # Remove closed cycles
             for cycle in cycles_to_remove:
+                logger.info(f"Removing cycle {cycle.cycle_id} from active cycles")
                 self._remove_cycle_from_active(cycle)
             
             if cycles_to_remove:
-                logger.info(f"Cleaned up {len(cycles_to_remove)} closed cycles")
+                logger.info(f"Cleaned up {len(cycles_to_remove)} closed cycles. Remaining active cycles: {len(self.active_cycles)}")
                 
         except Exception as e:
             logger.error(f"Error cleaning up closed cycles: {e}")
@@ -2083,17 +2080,33 @@ class AdvancedCyclesTrader(Strategy):
             logger.error(f"Error creating recovery cycle synchronously for order: {e}")
 
     def _is_order_in_any_cycle(self, position) -> bool:
-        """Check if an order is in any active cycle"""
-        ticket = getattr(position, 'ticket', None)
-        if not ticket:
+        """Check if an order is already in any cycle"""
+        try:
+            # Get ticket from position object using getattr
+            position_ticket = str(getattr(position, 'ticket', ''))
+            if not position_ticket:
+                logger.warning(f"No ticket found in position object")
+                return False
+            
+            for cycle in self.active_cycles:
+                # Check active orders
+                for order in cycle.active_orders:
+                    if str(order.get('ticket', '')) == position_ticket:
+                        logger.debug(f"Found order {position_ticket} in active orders of cycle {cycle.cycle_id}")
+                        return True
+                        
+                # Check completed orders
+                for order in cycle.completed_orders:
+                    if str(order.get('ticket', '')) == position_ticket:
+                        logger.debug(f"Found order {position_ticket} in completed orders of cycle {cycle.cycle_id}")
+                        return True
+            
+            logger.debug(f"Order {position_ticket} not found in any cycle")
             return False
-        
-        for cycle in self.active_cycles:
-            for order in cycle.active_orders:
-                if order.get('ticket') == str(ticket):
-                    return True
-        
-        return False
+            
+        except Exception as e:
+            logger.error(f"Error checking if order is in any cycle: {e}")
+            return False
 
     async def _process_missing_orders(self, missing_orders: List):
         """Process missing orders by creating recovery cycles"""
@@ -2685,11 +2698,15 @@ class AdvancedCyclesTrader(Strategy):
         Synchronous version of create_manual_cycle
         """
         try:
+            logger.info(f"Starting manual cycle creation with order {order_data.get('ticket')}")
+            
             # Create cycle data
             cycle_data = self._build_cycle_data(order_data, direction, username, user_id)
+            logger.info(f"Built cycle data: {cycle_data.get('id')}")
             
             # Create cycle instance
             cycle = AdvancedCycle(cycle_data, self.meta_trader, self.bot)
+            logger.info(f"Created cycle instance: {cycle.cycle_id}")
             
             # Add the order to the cycle before creating in database
             # Create Flutter-compatible order structure
@@ -2720,10 +2737,18 @@ class AdvancedCyclesTrader(Strategy):
             
             # Add order to cycle
             cycle.add_order(order_for_cycle)
+            logger.info(f"Added order {order_for_cycle.get('ticket')} to cycle {cycle.cycle_id}")
+            
+            # Verify cycle is not already in active cycles
+            existing_cycle = next((c for c in self.active_cycles if c.cycle_id == cycle.cycle_id), None)
+            if existing_cycle:
+                logger.warning(f"Cycle {cycle.cycle_id} already exists in active cycles")
+                return False
             
             # Add cycle to active cycles
             self.active_cycles.append(cycle)
             self.cycles[cycle.cycle_id] = cycle
+            logger.info(f"Added cycle {cycle.cycle_id} to active cycles. Total active cycles: {len(self.active_cycles)}")
             
             # Update in-memory statistics
             self.total_cycles_created += 1
@@ -2732,6 +2757,7 @@ class AdvancedCyclesTrader(Strategy):
             
             # Create cycle in PocketBase database (now with the order included)
             cycle._create_cycle_in_database()
+            logger.info(f"Created cycle {cycle.cycle_id} in database")
             
             logger.info(f"Manual cycle created: {cycle.cycle_id} ({direction}) with order {order_data.get('ticket')}")
             return True

@@ -320,42 +320,55 @@ class AdvancedCycle(cycle):
         return self._safe_float_conversion(value, default)
 
     def _recalculate_total_profit(self):
-        """Recalculate total profit for the cycle including ALL orders (active + completed)"""
+        """Recalculate total profit from all orders"""
         try:
-            # Calculate profit from active orders (unrealized)
+            logger.info(f"Recalculating total profit for cycle {self.cycle_id}")
+            
+            # Initialize profit components
             active_profit = 0.0
-            active_swap = 0.0
-            active_commission = 0.0
-            
-            for order in self.active_orders:
-                active_profit += float(order.get('profit', 0.0))
-                active_swap += float(order.get('swap', 0.0))
-                active_commission += float(order.get('commission', 0.0))
-            
-            # Calculate profit from completed orders (realized)
             completed_profit = 0.0
-            completed_swap = 0.0
-            completed_commission = 0.0
+            total_swap = 0.0
+            total_commission = 0.0
             
+            # Calculate profit from active orders
+            for order in self.active_orders:
+                profit = float(order.get('profit', 0.0))
+                swap = float(order.get('swap', 0.0))
+                commission = float(order.get('commission', 0.0))
+                
+                active_profit += profit
+                total_swap += swap
+                total_commission += commission
+                
+                logger.debug(f"Active order {order.get('ticket')}: Profit={profit}, Swap={swap}, Commission={commission}")
+            
+            # Calculate profit from completed orders
             for order in self.completed_orders:
-                completed_profit += float(order.get('profit', 0.0))
-                completed_swap += float(order.get('swap', 0.0))
-                completed_commission += float(order.get('commission', 0.0))
+                profit = float(order.get('profit', 0.0))
+                swap = float(order.get('swap', 0.0))
+                commission = float(order.get('commission', 0.0))
+                
+                completed_profit += profit
+                total_swap += swap
+                total_commission += commission
+                
+                logger.debug(f"Completed order {order.get('ticket')}: Profit={profit}, Swap={swap}, Commission={commission}")
             
-            # Calculate total profit including swap and commission
-            self.total_profit = active_profit + completed_profit + active_swap + completed_swap + active_commission + completed_commission
+            # Calculate total profit
+            self.total_profit = active_profit + completed_profit + total_swap + total_commission
             
-            # Update separate tracking for reversal system
-            self.open_orders_pl = active_profit + active_swap + active_commission
-            self.closed_orders_pl = completed_profit + completed_swap + completed_commission
-            self.total_cycle_pl = self.total_profit
+            logger.info(f"Cycle {self.cycle_id} profit calculation complete:")
+            logger.info(f"Active orders profit: {active_profit}")
+            logger.info(f"Completed orders profit: {completed_profit}")
+            logger.info(f"Total swap: {total_swap}")
+            logger.info(f"Total commission: {total_commission}")
+            logger.info(f"Total profit: {self.total_profit}")
+            
+            return self.total_profit
             
         except Exception as e:
-            logger.error(f"Error recalculating total profit: {e}")
-            self.total_profit = 0.0
-            self.open_orders_pl = 0.0
-            self.closed_orders_pl = 0.0
-            self.total_cycle_pl = 0.0
+            logger.error(f"Error calculating total profit: {e}")
+            return 0.0
 
     def _update_cycle_statistics_after_order_add(self, order_data):
         """Update cycle statistics after adding an order"""
@@ -423,7 +436,8 @@ class AdvancedCycle(cycle):
         
         for order in self.active_orders:
             try:
-                ticket = str(order.get('ticket', ''))
+                # Convert ticket to integer for dictionary lookup
+                ticket = int(order.get('ticket', '0'))
                 if ticket in positions_dict:
                     position = positions_dict[ticket]
                     
@@ -434,31 +448,43 @@ class AdvancedCycle(cycle):
                     order['volume'] = getattr(position, 'volume', order.get('volume', 0.0))
                     
                     updated_count += 1
+                    logger.info(f"Updated order {ticket} with profit: {order['profit']}, swap: {order['swap']}, commission: {order['commission']}")
+                else:
+                    logger.debug(f"Order {ticket} not found in positions dictionary. Available tickets: {list(positions_dict.keys())}")
                     
+            except ValueError as ve:
+                logger.error(f"Invalid ticket format for order: {order.get('ticket', 'unknown')}")
             except Exception as e:
                 logger.error(f"Error updating order {order.get('ticket', 'unknown')}: {e}")
         
+        logger.info(f"Updated {updated_count} orders out of {len(self.active_orders)} active orders")
         return updated_count
 
     # ==================== CYCLE STATUS MANAGEMENT ====================
 
     def update_cycle_status(self):
-        """Update cycle status based on current conditions"""
+        """Update cycle status based on orders and conditions"""
         try:
+            logger.info(f"Updating status for cycle {self.cycle_id}")
+            
             # Update order statuses first
             self._update_order_statuses()
+            logger.info(f"Updated order statuses for cycle {self.cycle_id}")
             
-            # Recalculate profits after status updates
-            self._recalculate_total_profit()
-            
-            # Check cycle completion conditions
+            # Check if cycle should be closed
+            if self._should_close_cycle():
+                logger.info(f"Cycle {self.cycle_id} meets closing conditions")
+                self.close_cycle("auto_close")
+            else:
+                # Recalculate total profit
+                self._recalculate_total_profit()
+                logger.info(f"Cycle {self.cycle_id} remains active. Total profit: {self.total_profit}")
+                
+            # Check completion conditions
             self._check_cycle_completion_conditions()
             
-            # Update reversal tracking
-            self._update_reversal_tracking()
-            
-            # Update database with latest information
-            self._update_cycle_in_database()
+            # Log final status
+            logger.info(f"Cycle {self.cycle_id} status update complete. Active: {self.is_active}, Closed: {self.is_closed}, Total Profit: {self.total_profit}")
             
         except Exception as e:
             logger.error(f"Error updating cycle status: {e}")
@@ -466,16 +492,23 @@ class AdvancedCycle(cycle):
     def _update_order_statuses(self):
         """Update the status of all orders in the cycle"""
         try:
-            orders_moved = 0
-            for order in self.active_orders.copy():
-                if self._is_order_closed(order):
-                    self._move_order_to_completed(order)
-                    orders_moved += 1
+            logger.info(f"Updating order statuses for cycle {self.cycle_id}")
             
-            # Recalculate profits if any orders were moved
-            if orders_moved > 0:
-                self._recalculate_total_profit()
-                    
+            # Track changes
+            orders_closed = 0
+            orders_active = 0
+            
+            # Update active orders
+            for order in self.active_orders[:]:  # Use slice copy to avoid modification during iteration
+                if self._is_order_closed(order):
+                    logger.info(f"Order {order.get('ticket')} is closed, moving to completed orders")
+                    self._move_order_to_completed(order)
+                    orders_closed += 1
+                else:
+                    orders_active += 1
+            
+            logger.info(f"Cycle {self.cycle_id} order status update complete. Active orders: {orders_active}, Newly closed: {orders_closed}")
+            
         except Exception as e:
             logger.error(f"Error updating order statuses: {e}")
 
@@ -527,46 +560,58 @@ class AdvancedCycle(cycle):
         pass
 
     def _should_close_cycle(self) -> bool:
-        """Determine if cycle should be closed"""
-        # Auto-completion disabled
-        return False
+        """Determine if cycle should be closed based on conditions"""
+        try:
+            # Check if all orders are closed
+            all_orders_closed = len(self.active_orders) == 0
+            
+            # Check if cycle is marked for closing
+            marked_for_closing = getattr(self, 'force_close', False)
+            
+            logger.info(f"Checking if cycle {self.cycle_id} should close. All orders closed: {all_orders_closed}, Marked for closing: {marked_for_closing}")
+            
+            return all_orders_closed or marked_for_closing
+            
+        except Exception as e:
+            logger.error(f"Error checking if cycle should close: {e}")
+            return False
 
     def close_cycle(self, reason: str):
-        """Close the cycle"""
+        """Close the cycle and update its status"""
         try:
+            logger.info(f"Closing cycle {self.cycle_id} with reason: {reason}")
+            
+            # Set cycle status
+            self.is_active = False
             self.is_closed = True
             self.close_reason = reason
-            self.close_time = datetime.datetime.now()
             
             # Calculate final statistics
             self._calculate_final_statistics()
             
-            # Update cycle in PocketBase database
+            # Update database
             self._update_cycle_in_database()
             
-            # Log cycle closure
-            logger.info(f"Cycle {self.cycle_id} closed: {reason}")
+            logger.info(f"Cycle {self.cycle_id} closed successfully. Final profit: {self.total_profit}")
             
         except Exception as e:
             logger.error(f"Error closing cycle: {e}")
 
     def _calculate_final_statistics(self):
-        """Calculate final cycle statistics"""
+        """Calculate final statistics when closing a cycle"""
         try:
-            self.total_orders = len(self.active_orders) + len(self.completed_orders)
-            self.total_volume = sum(
-                float(order.get('volume', 0.0)) for order in self.active_orders + self.completed_orders
-            )
-            
-            # Ensure final profit calculation includes all orders
+            # Force final profit calculation
             self._recalculate_total_profit()
             
-            # Calculate duration
-            if hasattr(self, 'created_at') and self.created_at:
-                duration = datetime.datetime.now() - self.created_at
-                self.duration_minutes = duration.total_seconds() / 60
+            # Calculate other statistics
+            total_orders = len(self.active_orders) + len(self.completed_orders)
+            completed_orders = len(self.completed_orders)
             
-            logger.info(f"Cycle {self.cycle_id} closed - Orders: {self.total_orders}, Volume: {self.total_volume:.2f}, Profit: {self.total_profit:.2f}")
+            logger.info(f"Final statistics for cycle {self.cycle_id}:")
+            logger.info(f"Total orders: {total_orders}")
+            logger.info(f"Completed orders: {completed_orders}")
+            logger.info(f"Total profit: {self.total_profit}")
+            logger.info(f"Close reason: {self.close_reason}")
             
         except Exception as e:
             logger.error(f"Error calculating final statistics: {e}")
