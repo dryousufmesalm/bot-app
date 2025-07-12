@@ -150,7 +150,7 @@ jobs:
             password = $env:POCKETBASE_ADMIN_PASSWORD
           } | ConvertTo-Json
           
-          $authResponse = Invoke-RestMethod -Uri "$env:POCKETBASE_URL/api/admins/auth-with-password" -Method POST -Body $authBody -ContentType "application/json"
+          $authResponse = Invoke-RestMethod -Uri "$env:POCKETBASE_URL/api/users/auth-with-password" -Method POST -Body $authBody -ContentType "application/json"
           $token = $authResponse.token
           Write-Host "✅ PocketBase authentication successful"
           
