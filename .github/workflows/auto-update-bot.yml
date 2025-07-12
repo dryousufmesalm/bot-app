@@ -163,13 +163,14 @@ jobs:
             build_number = "${{ github.run_number }}"
             commit_sha = "${{ github.sha }}"
             build_date = (Get-Date -Format "yyyy-MM-ddTHH:mm:ssZ")
-            platform = "bot"  # Changed to match the filter in auto_updater.py
+            platform = "bot"  # Changed from "bot" to valid platform value
+            serve_to = "all"  # Added required serve_to field
+            type = "release"  # Added required type field
             file_name = "PatrickDisplayBot-v${{ steps.version.outputs.version }}.exe"
             release_notes = Get-Content -Path "release-notes.md" -Raw
             status = "published"
             auto_update = $true  # Enable auto-update by default
           } | ConvertTo-Json
-          
           # Upload to PocketBase updates collection
           Write-Host "📤 Uploading release data to PocketBase..."
           $headers = @{
