@@ -1955,7 +1955,7 @@ class AdvancedCyclesTrader(Strategy):
             # Get symbol point from MetaTrader and multiply by 100
             symbol_info = self.meta_trader.get_symbol_info(self.symbol)
             if symbol_info and hasattr(symbol_info, 'point'):
-                return symbol_info.point * 100
+                return symbol_info.point * 10
             
         except Exception as e:
             logger.error(f"Error getting pip value: {e}")
