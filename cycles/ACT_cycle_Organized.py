@@ -471,17 +471,14 @@ class AdvancedCycle(cycle):
             self._update_order_statuses()
             logger.info(f"Updated order statuses for cycle {self.cycle_id}")
             
-            # Check if cycle should be closed
+            # Only check for closing if explicitly marked
             if self._should_close_cycle():
-                logger.info(f"Cycle {self.cycle_id} meets closing conditions")
-                self.close_cycle("auto_close")
+                logger.info(f"Cycle {self.cycle_id} explicitly marked for closing")
+                self.close_cycle("manual_close")
             else:
                 # Recalculate total profit
                 self._recalculate_total_profit()
-                logger.info(f"Cycle {self.cycle_id} remains active. Total profit: {self.total_profit}")
-                
-            # Check completion conditions
-            self._check_cycle_completion_conditions()
+                logger.info(f"Cycle {self.cycle_id} remains active. Active orders: {len(self.active_orders)}, Completed orders: {len(self.completed_orders)}, Total profit: {self.total_profit}")
             
             # Log final status
             logger.info(f"Cycle {self.cycle_id} status update complete. Active: {self.is_active}, Closed: {self.is_closed}, Total Profit: {self.total_profit}")
@@ -521,11 +518,14 @@ class AdvancedCycle(cycle):
             
             # Check if position still exists in MT5
             positions = self._get_mt5_positions()
-            for pos in positions:
-                if str(getattr(pos, 'ticket', '')) == str(ticket):
-                    return False
+            position_tickets = [str(getattr(pos, 'ticket', '')) for pos in positions]
             
-            return True
+            # If the order is not in MT5 positions and not already marked as closed
+            if str(ticket) not in position_tickets and not order.get('is_closed', False):
+                logger.info(f"Order {ticket} not found in MT5 positions and not marked as closed")
+                return True
+            
+            return False
             
         except Exception as e:
             logger.error(f"Error checking if order is closed: {e}")
@@ -562,15 +562,17 @@ class AdvancedCycle(cycle):
     def _should_close_cycle(self) -> bool:
         """Determine if cycle should be closed based on conditions"""
         try:
-            # Check if all orders are closed
-            all_orders_closed = len(self.active_orders) == 0
-            
             # Check if cycle is marked for closing
             marked_for_closing = getattr(self, 'force_close', False)
             
-            logger.info(f"Checking if cycle {self.cycle_id} should close. All orders closed: {all_orders_closed}, Marked for closing: {marked_for_closing}")
-            
-            return all_orders_closed or marked_for_closing
+            # Only close if explicitly marked for closing
+            # Do not auto-close just because active_orders is empty
+            if marked_for_closing:
+                logger.info(f"Cycle {self.cycle_id} marked for closing")
+                return True
+                
+            logger.debug(f"Cycle {self.cycle_id} not marked for closing, keeping active")
+            return False
             
         except Exception as e:
             logger.error(f"Error checking if cycle should close: {e}")
