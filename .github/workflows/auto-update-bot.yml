@@ -154,61 +154,47 @@ jobs:
           $token = $authResponse.token
           Write-Host "✅ PocketBase authentication successful"
           
-          # Prepare form data
-          $boundary = [System.Guid]::NewGuid().ToString()
-          $LF = "`r`n"
-          $filePath = "./dist/PatrickDisplayBot-v${{ steps.version.outputs.version }}.exe"
+          # First create the record without the file
+          Write-Host "📝 Creating update record..."
+          $updateData = @{
+            version = "${{ steps.version.outputs.version }}"
+            force_update = $false
+            patch = [int]"${{ github.run_number }}"
+            rollback = $false
+            platform = "bot"
+            type = "release"
+            serve_to = @("all")
+            description = Get-Content -Path "release-notes.md" -Raw
+          } | ConvertTo-Json
           
-          # Create form data content
-          $bodyLines = @(
-              "--$boundary",
-              "Content-Disposition: form-data; name=`"version`"$LF",
-              "${{ steps.version.outputs.version }}",
-              "--$boundary",
-              "Content-Disposition: form-data; name=`"force_update`"$LF",
-              "false",
-              "--$boundary",
-              "Content-Disposition: form-data; name=`"patch`"$LF",
-              "${{ github.run_number }}",
-              "--$boundary",
-              "Content-Disposition: form-data; name=`"rollback`"$LF",
-              "false",
-              "--$boundary",
-              "Content-Disposition: form-data; name=`"platform`"$LF",
-              "bot",
-              "--$boundary",
-              "Content-Disposition: form-data; name=`"type`"$LF",
-              "release",
-              "--$boundary",
-              "Content-Disposition: form-data; name=`"serve_to`"$LF",
-              "[`"all`"]",
-              "--$boundary",
-              "Content-Disposition: form-data; name=`"description`"$LF",
-              "$(Get-Content -Path `"release-notes.md`" -Raw)",
-              "--$boundary",
-              "Content-Disposition: form-data; name=`"attachment`"; filename=`"PatrickDisplayBot-v${{ steps.version.outputs.version }}.exe`"",
-              "Content-Type: application/octet-stream$LF",
-              "$([System.IO.File]::ReadAllBytes($filePath))",
-              "--$boundary--"
-          )
-          
-          $body = $bodyLines -join $LF
-          
-          # Upload to PocketBase updates collection
-          Write-Host "📤 Uploading release data to PocketBase..."
           $headers = @{
             "Authorization" = "Bearer $token"
-            "Content-Type" = "multipart/form-data; boundary=$boundary"
+            "Content-Type" = "application/json"
           }
           
-          $uploadResponse = Invoke-RestMethod -Uri "$env:POCKETBASE_URL/api/collections/updates/records" -Method POST -Body $body -Headers $headers
+          $createResponse = Invoke-RestMethod -Uri "$env:POCKETBASE_URL/api/collections/updates/records" -Method POST -Body $updateData -Headers $headers
+          $recordId = $createResponse.id
+          Write-Host "✅ Created update record with ID: $recordId"
+          
+          # Now upload the file separately
+          Write-Host "📤 Uploading executable file..."
+          $filePath = "./dist/PatrickDisplayBot-v${{ steps.version.outputs.version }}.exe"
+          $fileBytes = [System.IO.File]::ReadAllBytes($filePath)
+          $fileContent = [System.Convert]::ToBase64String($fileBytes)
+          
+          $fileData = @{
+            attachment = $fileContent
+          } | ConvertTo-Json
+          
+          $uploadUrl = "$env:POCKETBASE_URL/api/collections/updates/records/$recordId"
+          $uploadResponse = Invoke-RestMethod -Uri $uploadUrl -Method PATCH -Body $fileData -Headers $headers
           
           Write-Host "✅ Successfully uploaded to PocketBase!"
-          Write-Host "📋 Record ID: $($uploadResponse.id)"
+          Write-Host "📋 Record ID: $recordId"
           
         } catch {
           Write-Host "❌ Failed to upload to PocketBase: $($_.Exception.Message)"
-          Write-Host "Response: $($_.Exception.Response)"
+          Write-Host "Response: $($_.Exception.Response | Format-List | Out-String)"
           Write-Host "⚠️ PocketBase upload failed, but GitHub release was successful"
           exit 1
         }
