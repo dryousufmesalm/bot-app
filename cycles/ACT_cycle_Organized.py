@@ -1202,7 +1202,7 @@ class AdvancedCycle(cycle):
             try:
                 # Get symbol point from MT5 and multiply by 100 for pip value
                 symbol_info = self.meta_trader.get_symbol_info(symbol)
-                return symbol_info.point * 100
+                return symbol_info.point * 10
             except Exception as inner_e:
                 logger.warning(f"Could not get symbol point from MT5: {inner_e}, using fallback")
                 return 0.0001

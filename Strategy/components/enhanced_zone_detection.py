@@ -548,7 +548,7 @@ class EnhancedZoneDetection:
                 return self._get_fallback_pip_value()
             
             point = symbol_info.point
-            pip_value = point*100
+            pip_value = point*10
             return pip_value
             
         except Exception as e:

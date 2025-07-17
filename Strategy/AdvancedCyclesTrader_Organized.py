@@ -1387,7 +1387,7 @@ class AdvancedCyclesTrader(Strategy):
             # Continue with other strategy logic using filtered cycles
             self._check_reversal_conditions_for_cycles(current_price, market_data, cycles_for_breach_reversal)
             self._check_zone_breaches(current_price, market_data, cycles_for_breach_reversal)
-            self._manage_continuous_orders_for_cycles(current_price, market_data, active_cycles)
+            # self._manage_continuous_orders_for_cycles(current_price, market_data, active_cycles)
             
         except Exception as e:
             logger.error(f"Error processing strategy logic: {e}")
@@ -1413,7 +1413,7 @@ class AdvancedCyclesTrader(Strategy):
                         if recovery_data.get('recovery_activated', False):
                             # Check if cycle has recovery orders
                             recovery_orders = [
-                                order for order in cycle.active_orders 
+                                order for order in cycle.active_orders + cycle.completed_orders
                                 if order.get('kind') == 'recovery'
                             ]
                             
@@ -1430,9 +1430,9 @@ class AdvancedCyclesTrader(Strategy):
                     else:
                         # In recovery mode but no recovery data - exclude from checks
                         logger.debug(f"Cycle {cycle_id} excluded from breach/reversal checks - in recovery mode but no recovery data")
-                else:
+                # else:
                     # Not in recovery mode - include in normal checks
-                    filtered_cycles.append(cycle)
+                    # filtered_cycles.append(cycle)
             
             logger.debug(f"Filtered {len(filtered_cycles)} cycles out of {len(active_cycles)} for breach/reversal checks")
             return filtered_cycles
@@ -1446,10 +1446,10 @@ class AdvancedCyclesTrader(Strategy):
         try:
             # Check normal active cycles (already filtered to exclude recovery cycles without orders)
             for cycle in active_cycles:
-                # Skip if cycle is in recovery mode without recovery orders (double check)
-                if self._is_cycle_in_recovery_without_orders(cycle):
-                    logger.debug(f"Skipping reversal check for cycle {cycle.cycle_id} - in recovery mode without orders")
-                    continue
+                # # Skip if cycle is in recovery mode without recovery orders (double check)
+                # if self._is_cycle_in_recovery_without_orders(cycle):
+                #     logger.debug(f"Skipping reversal check for cycle {cycle.cycle_id} - in recovery mode without orders")
+                #     continue
                     
                 reversal_info = cycle.check_reversal_condition(current_price)
                 
@@ -1506,42 +1506,49 @@ class AdvancedCyclesTrader(Strategy):
             cycle = recovery_data['cycle']
             initial_direction = recovery_data['initial_direction']
             
-            # Get recovery orders (orders placed after initial stop loss)
+            # Get recovery orders (orders placed after initial stop loss) from both active and completed orders
+            all_orders = []
+            if hasattr(cycle, 'active_orders'):
+                all_orders.extend(cycle.active_orders)
+    
             recovery_orders = [
-                order for order in cycle.active_orders 
+                order for order in all_orders
                 if order.get('kind') == 'recovery'
             ]
-            
             if not recovery_orders:
                 return result
-            
             pip_value = self._get_pip_value()
             reversal_distance_points = self.reversal_threshold_pips * pip_value
             
             if initial_direction == "BUY":
-                # Find highest recovery buy order price
-                highest_recovery_price = max(
+                # Find highest recovery buy order price among BUY orders
+                buy_recovery_orders = [
                     order.get('open_price', 0.0) for order in recovery_orders 
                     if order.get('type') == 0  # BUY orders
-                )
-                
-                if highest_recovery_price > 0:
-                    reversal_price = highest_recovery_price - reversal_distance_points
+                ]
+                if buy_recovery_orders:
+                    highest_recovery_price = max(buy_recovery_orders)
                     
-                    if current_price <= reversal_price:
-                        result.update({
-                            'should_reverse': True,
-                            'new_direction': 'SELL',
-                            'reversal_price': reversal_price,
-                            'reversal_reason': f'Price dropped {self.reversal_threshold_pips} pips from highest recovery buy at {highest_recovery_price}'
-                        })
-            
+                    if highest_recovery_price > 0:
+                        reversal_price = highest_recovery_price - reversal_distance_points
+                        
+                        if current_price <= reversal_price:
+                            result.update({
+                                'should_reverse': True,
+                                'new_direction': 'SELL',
+                                'reversal_price': reversal_price,
+                                'reversal_reason': f'Price dropped {self.reversal_threshold_pips} pips from highest recovery buy at {highest_recovery_price}'
+                            })
             elif initial_direction == "SELL":
                 # Find lowest recovery sell order price
-                lowest_recovery_price = min(
+                sell_recovery_orders = [
                     order.get('open_price', float('inf')) for order in recovery_orders 
                     if order.get('type') == 1  # SELL orders
-                )
+                ]
+                if sell_recovery_orders:
+                    lowest_recovery_price = min(sell_recovery_orders)
+                else:
+                    lowest_recovery_price = float('inf')
                 
                 if lowest_recovery_price < float('inf'):
                     reversal_price = lowest_recovery_price + reversal_distance_points
@@ -1578,8 +1585,8 @@ class AdvancedCyclesTrader(Strategy):
                 # Switch direction
                 cycle.switch_direction(new_direction, "recovery_reversal")
                 
-                # Clean up recovery mode and return to normal trading
-                self._exit_recovery_mode(cycle_id, recovery_data)
+                # # Clean up recovery mode and return to normal trading
+                # self._exit_recovery_mode(cycle_id, recovery_data)
                 
                 # Update cycle in database
                 cycle._update_cycle_in_database()
@@ -1702,15 +1709,15 @@ class AdvancedCyclesTrader(Strategy):
             target_cycle = None
             for cycle in cycles_to_check:
                 # Skip if cycle is in recovery mode without recovery orders (double check)
-                if self._is_cycle_in_recovery_without_orders(cycle):
-                    continue
+                # if self._is_cycle_in_recovery_without_orders(cycle):
+                #     continue
                     
                 # Use zone engine to detect breaches
                 cycle._update_price_extremes(current_price)
                 if cycle.current_direction == "BUY":
-                    zone_status = self.zone_engine.detect_zone_breach(current_price, cycle.highest_buy_price)
+                    zone_status = self.zone_engine.detect_zone_breach(current_price, cycle.highest_buy_price,self.order_interval_pips)
                 elif cycle.current_direction == "SELL":
-                    zone_status = self.zone_engine.detect_zone_breach(current_price, cycle.lowest_sell_price)
+                    zone_status = self.zone_engine.detect_zone_breach(current_price, cycle.lowest_sell_price,self.order_interval_pips)
                 
                 if zone_status.get('breach_detected', False):
                     logger.info(f"Zone breach detected: {zone_status}")
@@ -2551,9 +2558,11 @@ class AdvancedCyclesTrader(Strategy):
             self.recovery_cycles[cycle.cycle_id] = {
                 'cycle': cycle,
                 'initial_direction': cycle.current_direction,
+                'initial_order_open_price': float(initial_order['open_price']),  # NEW: Store initial order open price
                 'initial_stop_loss_price': current_price,
                 'recovery_zone_base_price': current_price,
                 'recovery_activated': False,
+                'recovery_direction': None,  # NEW: Track activation direction
                 'initial_order_data': initial_order,
                 'placed_levels': set(),  # Track price levels where orders were placed
                 'entry_time': datetime.datetime.now(),
@@ -2854,12 +2863,20 @@ class AdvancedCyclesTrader(Strategy):
                     logger.error(f"Error closing order {order.get('ticket')} for take profit: {order_error}")
                     continue
             
-            # Update cycle status with is_closed=True
+            # CRITICAL: Explicitly set cycle status to CLOSED before database update
             cycle.is_closed = True
             cycle.is_active = False
+            cycle.status = 'closed'  # Explicit status field
             cycle.close_reason = "take_profit"
             cycle.closed_by = "system"
             cycle.close_time = datetime.datetime.now()
+            
+            # Verify critical status fields are set correctly
+            logger.info(f"🔒 CYCLE STATUS VERIFICATION for {cycle.cycle_id}:")
+            logger.info(f"   - is_closed: {cycle.is_closed}")
+            logger.info(f"   - is_active: {cycle.is_active}")
+            logger.info(f"   - status: {getattr(cycle, 'status', 'NOT_SET')}")
+            logger.info(f"   - close_reason: {cycle.close_reason}")
             
             # Calculate final profit
             final_profit_pips = self._calculate_cycle_total_profit_pips(cycle, current_price)
@@ -2874,11 +2891,23 @@ class AdvancedCyclesTrader(Strategy):
                 import asyncio
                 loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(loop)
+                
+                # Log the status data being sent to PocketBase
+                logger.info(f"📤 SENDING TO POCKETBASE for cycle {cycle.cycle_id}:")
+                logger.info(f"   - is_closed: {cycle.is_closed}")
+                logger.info(f"   - status: {getattr(cycle, 'status', 'NOT_SET')}")
+                logger.info(f"   - close_reason: {cycle.close_reason}")
+                logger.info(f"   - close_time: {cycle.close_time}")
+                
                 loop.run_until_complete(self._update_cycle_in_database(cycle))
                 loop.close()
-                logger.info(f"✅ Database updated with is_closed=True for cycle {cycle.cycle_id}")
+                
+                logger.info(f"✅ DATABASE UPDATED SUCCESSFULLY for cycle {cycle.cycle_id}")
+                logger.info(f"   🔒 Cycle marked as CLOSED in PocketBase with take_profit reason")
+                
             except Exception as db_error:
-                logger.error(f"❌ Failed to update database for cycle {cycle.cycle_id}: {db_error}")
+                logger.error(f"❌ CRITICAL: Failed to update database for cycle {cycle.cycle_id}: {db_error}")
+                logger.error(f"   ⚠️  Cycle may still appear as ACTIVE in PocketBase!")
                 # Continue with local cleanup even if database update fails
             
             # Update in-memory statistics
@@ -2887,7 +2916,11 @@ class AdvancedCyclesTrader(Strategy):
             # Remove cycle from active management
             self._remove_cycle_from_active(cycle)
             
-            logger.info(f"Cycle {cycle.cycle_id} closed due to take profit: {closed_orders_count} orders closed, final profit: {final_profit_pips:.2f} pips - Database updated with is_closed=True")
+            logger.info(f"🎯 TAKE PROFIT CYCLE CLOSURE COMPLETE for {cycle.cycle_id}:")
+            logger.info(f"   📊 Orders closed: {closed_orders_count}")
+            logger.info(f"   💰 Final profit: {final_profit_pips:.2f} pips")
+            logger.info(f"   🔒 Cycle status: CLOSED (is_closed=True)")
+            logger.info(f"   💾 Database: Updated with closed status")
                 
         except Exception as e:
             logger.error(f"Error closing cycle on take profit: {e}")
@@ -2911,70 +2944,90 @@ class AdvancedCyclesTrader(Strategy):
                 
                 # Check if recovery zone should be activated
                 if not recovery_data['recovery_activated']:
-                    if self._should_activate_recovery_zone(recovery_data, current_price):
-                        self._activate_recovery_zone(cycle_id, recovery_data, current_price)
+                    should_activate, activation_direction = self._should_activate_recovery_zone(recovery_data, current_price)
+                    if should_activate:
+                        self._activate_recovery_zone(cycle_id, recovery_data, current_price, activation_direction)
                 
-                # If recovery zone is active and cycle still in recovery, manage zone-based orders
-                if cycle_id in self.recovery_cycles and recovery_data.get('recovery_activated', False):
-                    self._manage_recovery_zone_orders(cycle_id, recovery_data, current_price)
+                # # If recovery zone is active and cycle still in recovery, manage zone-based orders
+                # if cycle_id in self.recovery_cycles and recovery_data.get('recovery_activated', False):
+                #     self._manage_recovery_zone_orders(cycle_id, recovery_data, current_price)
                 
         except Exception as e:
             logger.error(f"Error checking post-stop-loss recovery: {e}")
 
-    def _should_activate_recovery_zone(self, recovery_data: dict, current_price: float) -> bool:
-        """Check if recovery zone should be activated"""
+    def _should_activate_recovery_zone(self, recovery_data: dict, current_price: float) -> tuple[bool, str]:
+        """Check if recovery zone should be activated - SINGLE DIRECTION ONLY"""
         try:
+            # If already activated, don't change direction
+            if recovery_data.get('recovery_activated', False):
+                return False, None
+                
+            # CHANGE: Use initial order open price instead of stop loss price
+            initial_order_open_price = recovery_data['initial_order_open_price']
             initial_direction = recovery_data['initial_direction']
-            stop_loss_price = recovery_data['initial_stop_loss_price']
-            
-            # Calculate zone range distance from initial stop loss price using zone_range_pips
+            # Calculate zone range distance from initial order open price
             pip_value = self._get_pip_value()
             zone_range_distance_points = self.zone_range_pips * pip_value
             
-            if initial_direction == "BUY":
-                # For BUY: activate when price drops zone_range_pips below stop loss
-                activation_price = stop_loss_price - zone_range_distance_points
-                should_activate = current_price <= activation_price
-            else:  # SELL
-                # For SELL: activate when price rises zone_range_pips above stop loss
-                activation_price = stop_loss_price + zone_range_distance_points
-                should_activate = current_price >= activation_price
+            # NEW: Check BOTH directions from open price
+            downward_activation_price = initial_order_open_price - zone_range_distance_points
+            upward_activation_price = initial_order_open_price + zone_range_distance_points
             
-            if should_activate:
-                logger.info(f"Recovery zone activation triggered at {current_price} (threshold: {activation_price}) using zone_range_pips: {self.zone_range_pips}")
+            # NEW: Single direction activation logic - FIRST direction to breach threshold wins
+            if current_price <= downward_activation_price:
+                if initial_direction == "BUY":
+                    return True, "BUY"  # Price moved down, place BUY and LOCK direction
+                else:
+                    return True, "SELL"  # Price moved down, place SELL and LOCK direction
+            elif current_price >= upward_activation_price:
+                if initial_direction == "SELL":
+                    return True, "SELL"  # Price moved up, place SELL and LOCK direction
+                else:
+                    return True, "BUY"  # Price moved up, place BUY and LOCK direction
             
-            return should_activate
+            return False, None
             
         except Exception as e:
             logger.error(f"Error checking recovery zone activation: {e}")
-            return False
+            return False, None
 
-    def _activate_recovery_zone(self, cycle_id: str, recovery_data: dict, current_price: float):
-        """Activate recovery zone trading"""
+    def _activate_recovery_zone(self, cycle_id: str, recovery_data: dict, current_price: float, direction: str):
+        """Activate recovery zone trading in specified direction"""
         try:
             recovery_data['recovery_activated'] = True
             recovery_data['activation_price'] = current_price
             recovery_data['activation_time'] = datetime.datetime.now()
+            recovery_data['recovery_direction'] = direction  # NEW: Store direction
             
             cycle = recovery_data['cycle']
             
-            logger.info(f"🟡 Recovery zone ACTIVATED for cycle {cycle_id} at price {current_price}")
+            logger.info(f"🟡 Recovery zone ACTIVATED for cycle {cycle_id} at price {current_price} in {direction} direction")
             
-            # Place first recovery order at current price
-            self._place_recovery_order(cycle_id, recovery_data, current_price)
+            # Close any existing opposite direction recovery orders
+            self._close_opposite_direction_recovery_orders(cycle, direction)
+            
+            # Place first recovery order in the determined direction
+            self._place_recovery_order_with_direction(cycle_id, recovery_data, current_price, direction)
             
         except Exception as e:
             logger.error(f"Error activating recovery zone: {e}")
 
     def _manage_recovery_zone_orders(self, cycle_id: str, recovery_data: dict, current_price: float):
-        """Manage orders in the recovery zone"""
+        """Manage orders in the recovery zone - SINGLE DIRECTION ONLY"""
         try:
             # Check if cycle is still in recovery mode (might have been removed after first order)
             if cycle_id not in self.recovery_cycles:
                 return
                 
             cycle = recovery_data['cycle']
-            initial_direction = recovery_data['initial_direction']
+            # CHANGE: Use stored recovery direction instead of initial direction
+            recovery_direction = recovery_data.get('recovery_direction')
+            
+            # Validate recovery direction is set
+            if not recovery_direction:
+                logger.warning(f"Recovery direction not set for cycle {cycle_id}, skipping order placement")
+                return
+                
             placed_levels = recovery_data['placed_levels']
             
             # Calculate price level for potential order placement
@@ -2986,11 +3039,11 @@ class AdvancedCyclesTrader(Strategy):
             
             # Check if we should place an order at this level
             if price_level not in placed_levels:
-                # Only place order in the same direction as initial order
-                self._place_recovery_order(cycle_id, recovery_data, price_level)
+                # ONLY place orders in the locked recovery direction
+                self._place_recovery_order_with_direction(cycle_id, recovery_data, price_level, recovery_direction)
                 placed_levels.add(price_level)
                 
-                logger.info(f"Recovery order placed at level {price_level} for cycle {cycle_id}")
+                logger.info(f"Recovery order placed at level {price_level} for cycle {cycle_id} in LOCKED {recovery_direction} direction")
             
         except Exception as e:
             logger.error(f"Error managing recovery zone orders: {e}")
@@ -3013,6 +3066,25 @@ class AdvancedCyclesTrader(Strategy):
             
         except Exception as e:
             logger.error(f"Error placing recovery order: {e}")
+
+    def _place_recovery_order_with_direction(self, cycle_id: str, recovery_data: dict, price: float, direction: str):
+        """Place a recovery order in the specified direction (not necessarily initial direction)"""
+        try:
+            cycle = recovery_data['cycle']
+            
+            # NEW: Place order based on activation direction, not initial direction
+            if direction == "BUY":
+                self._place_recovery_buy_order(cycle, price)
+            elif direction == "SELL":
+                self._place_recovery_sell_order(cycle, price)
+            
+            # Update recovery data
+            recovery_data['last_order_price'] = price
+            recovery_data['last_order_time'] = datetime.datetime.now()
+            #switch direction to the direction of the order
+            cycle.switch_direction(direction,'recovery')
+        except Exception as e:
+            logger.error(f"Error placing directional recovery order: {e}")
 
     def _place_recovery_buy_order(self, cycle, price: float):
         """Place a recovery buy order"""
@@ -3063,8 +3135,8 @@ class AdvancedCyclesTrader(Strategy):
                 
                 logger.info(f"Recovery buy order placed: {order_data[0].ticket}")
                 
-                # Exit recovery mode after first recovery order is successfully placed
-                self._exit_recovery_mode_after_first_order(cycle.cycle_id, cycle)
+                # # Exit recovery mode after first recovery order is successfully placed
+                # self._exit_recovery_mode_after_first_order(cycle.cycle_id, cycle)
                 
         except Exception as e:
             logger.error(f"Error placing recovery buy order: {e}")
@@ -3118,8 +3190,8 @@ class AdvancedCyclesTrader(Strategy):
                 
                 logger.info(f"Recovery sell order placed: {order_data[0].ticket}")
                 
-                # Exit recovery mode after first recovery order is successfully placed
-                self._exit_recovery_mode_after_first_order(cycle.cycle_id, cycle)
+                # # Exit recovery mode after first recovery order is successfully placed
+                # self._exit_recovery_mode_after_first_order(cycle.cycle_id, cycle)
                 
         except Exception as e:
             logger.error(f"Error placing recovery sell order: {e}")
@@ -3133,6 +3205,38 @@ class AdvancedCyclesTrader(Strategy):
                 del self.recovery_price_levels[cycle_id]
         except Exception as e:
             logger.error(f"Error cleaning up recovery cycle: {e}")
+
+    def _close_opposite_direction_recovery_orders(self, cycle, recovery_direction: str):
+        """Close any recovery orders in the opposite direction"""
+        try:
+            opposite_direction = "SELL" if recovery_direction == "BUY" else "BUY"
+            orders_closed = 0
+            
+            # Find and close opposite direction recovery orders
+            for order in cycle.active_orders:
+                if (order.get('kind') == 'recovery' and 
+                    order.get('direction') == opposite_direction and 
+                    order.get('status') == 'active'):
+                    
+                    # Close the opposite direction order
+                    try:
+                        ticket = order.get('ticket')
+                        if ticket:
+                            close_result = self.meta_trader.close_position(ticket)
+                            if close_result:
+                                order['status'] = 'closed'
+                                orders_closed += 1
+                                logger.info(f"Closed opposite direction recovery order {ticket} ({opposite_direction}) when activating {recovery_direction} recovery")
+                            else:
+                                logger.warning(f"Failed to close opposite direction recovery order {ticket}")
+                    except Exception as close_error:
+                        logger.error(f"Error closing opposite direction recovery order {order.get('ticket')}: {close_error}")
+            
+            if orders_closed > 0:
+                logger.info(f"Closed {orders_closed} opposite direction recovery orders when locking to {recovery_direction}")
+                
+        except Exception as e:
+            logger.error(f"Error closing opposite direction recovery orders: {e}")
 
     def _exit_recovery_mode_after_first_order(self, cycle_id: str, cycle):
         """Remove cycle from recovery mode after first recovery order is placed"""

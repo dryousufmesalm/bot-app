@@ -662,13 +662,18 @@ class MultiCycleManager:
             if symbol is None:
                 symbol = getattr(self, 'symbol', 'EURUSD')
             
-            if 'JPY' in symbol:
-                return 100.0  # JPY pairs have 2 decimal places
-            else:
-                return 10000.0  # Most pairs have 4 decimal places
+            # Try to get the symbol's point value from MetaTrader if available
+            if hasattr(self, 'meta_trader') and hasattr(self.meta_trader, 'get_symbol_info'):
+                symbol_info = self.meta_trader.get_symbol_info(symbol)
+                if symbol_info and 'point' in symbol_info and symbol_info['point'] > 0:
+                    pip_value = symbol_info['point']*10
+                    return pip_value
+            
+            pip_value = 0.01
+            return pip_value
         except Exception as e:
-            logger.error(f"Error getting pip value: {e}")
-            return 10000.0  # Default
+            logger.error(f"Error getting symbol point: {e}")
+            return 0.01  # Default
     
     def get_manager_statistics(self) -> Dict:
         """

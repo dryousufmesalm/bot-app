@@ -2,19 +2,36 @@ import logging
 import os
 import sys
 
+# Set the root logger to ERROR level to override all other configurations
+logging.basicConfig(level=logging.ERROR, force=True)
+
 # Create a global logger
 app_logger = logging.getLogger("app_logger")
 app_logger.setLevel(logging.DEBUG)
 
-# Create a file handler with UTF-8 encoding
+# Set all existing loggers to ERROR level
+def set_all_loggers_to_error():
+    """Set all existing loggers to ERROR level only"""
+    for name in logging.Logger.manager.loggerDict:
+        logger_instance = logging.getLogger(name)
+        logger_instance.setLevel(logging.ERROR)
+        
+        # Also set all handlers to ERROR level
+        for handler in logger_instance.handlers:
+            handler.setLevel(logging.ERROR)
+
+# Apply error-only setting to all loggers
+set_all_loggers_to_error()
+
+# Create a file handler with UTF-8 encoding - ERRORS ONLY
 # log_file = os.path.join(os.path.dirname(__file__), 'app.log')
 log_file = os.path.join("app.log")
 file_handler = logging.FileHandler(log_file, encoding='utf-8')
-file_handler.setLevel(logging.DEBUG)
+file_handler.setLevel(logging.ERROR)  # Only write ERROR and CRITICAL messages to file
 
-# Create a console handler with UTF-8 encoding
+# Create a console handler with UTF-8 encoding - ERRORS ONLY
 console_handler = logging.StreamHandler(sys.stdout)
-console_handler.setLevel(logging.INFO)
+console_handler.setLevel(logging.ERROR)  # Only show ERROR and CRITICAL messages in console
 
 # Create a formatter and set it for both handlers
 # Use ASCII-safe formatter to avoid Unicode issues
