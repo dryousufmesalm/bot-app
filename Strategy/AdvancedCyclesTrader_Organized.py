@@ -257,6 +257,34 @@ class AdvancedCyclesTrader(Strategy):
                         logger.info(f"Synced cycle {cycle.cycle_id} from PocketBase")
                         logger.debug(f"Cycle {cycle.cycle_id} has {len(cycle.active_orders)} active orders after creation")
                         synced_count += 1
+                        # check if cycle is in recovery mode
+                        if cycle.in_recovery_mode:
+                            logger.info(f"Cycle {cycle.cycle_id} is in recovery mode")
+                            # add cycle to recovery cycles if not already in recovery cycles
+                            if cycle.cycle_id not in self.recovery_cycles:
+                                # Get current price for setup
+                                market_data = self._get_market_data()
+                                if not market_data:
+                                    logger.error(f"Could not get market data for recovery setup of cycle {cycle.cycle_id}")
+                                    continue
+                                    
+                                current_price = market_data.get('ask', 0.0)
+                                
+                                # Find initial order from cycle's orders
+                                initial_order = None
+                                for order in cycle.active_orders + cycle.completed_orders:
+                                    if order.get('kind') != 'recovery':  # Initial order is not a recovery order
+                                        initial_order = order
+                                        break
+                                
+                                if initial_order:
+                                    try:
+                                        self._setup_recovery_mode(cycle, current_price, initial_order)
+                                        logger.info(f"Added cycle {cycle.cycle_id} to recovery cycles")
+                                    except Exception as e:
+                                        logger.error(f"Error setting up recovery mode for cycle {cycle.cycle_id}: {e}")
+                                else:
+                                    logger.error(f"Could not find initial order for recovery cycle {cycle.cycle_id}")
                     else:
                         logger.error(f"Failed to create AdvancedCycle for PocketBase cycle {cycle_id}")
                     
@@ -270,7 +298,6 @@ class AdvancedCyclesTrader(Strategy):
             
             # Update loss tracker
             self.loss_tracker['active_cycles_count'] = len(self.active_cycles)
-            
         except Exception as e:
             logger.error(f"Error syncing cycles with PocketBase: {e}")
             import traceback
@@ -1510,11 +1537,14 @@ class AdvancedCyclesTrader(Strategy):
             all_orders = []
             if hasattr(cycle, 'active_orders'):
                 all_orders.extend(cycle.active_orders)
+            if hasattr(cycle, 'completed_orders'):
+                all_orders.extend(cycle.completed_orders)
     
             recovery_orders = [
                 order for order in all_orders
                 if order.get('kind') == 'recovery'
             ]
+            
             if not recovery_orders:
                 return result
             pip_value = self._get_pip_value()
@@ -1765,7 +1795,7 @@ class AdvancedCyclesTrader(Strategy):
             
             # Check if cycle has recovery orders
             recovery_orders = [
-                order for order in cycle.active_orders 
+                order for order in cycle.active_orders + cycle.completed_orders
                 if order.get('kind') == 'recovery'
             ]
             
@@ -2577,13 +2607,9 @@ class AdvancedCyclesTrader(Strategy):
             cycle.recovery_zone_base_price = current_price
             cycle.initial_stop_loss_price = current_price
             
-            # Update cycle in database (run async method in thread)
+            # Update cycle in database using synchronous method
             try:
-                import asyncio
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                loop.run_until_complete(self._update_cycle_in_database(cycle))
-                loop.close()
+                cycle._update_cycle_in_database_sync()
                 logger.info(f"✅ Database updated for recovery mode setup - cycle {cycle.cycle_id}")
             except Exception as db_error:
                 logger.error(f"❌ Failed to update database for recovery mode setup - cycle {cycle.cycle_id}: {db_error}")
@@ -2886,12 +2912,8 @@ class AdvancedCyclesTrader(Strategy):
                 order['status'] = 'inactive'
                 order['is_active'] = False
             
-            # Update cycle in database (run async method in thread)
+            # Update cycle in database using synchronous method
             try:
-                import asyncio
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                
                 # Log the status data being sent to PocketBase
                 logger.info(f"📤 SENDING TO POCKETBASE for cycle {cycle.cycle_id}:")
                 logger.info(f"   - is_closed: {cycle.is_closed}")
@@ -2899,8 +2921,7 @@ class AdvancedCyclesTrader(Strategy):
                 logger.info(f"   - close_reason: {cycle.close_reason}")
                 logger.info(f"   - close_time: {cycle.close_time}")
                 
-                loop.run_until_complete(self._update_cycle_in_database(cycle))
-                loop.close()
+                cycle._update_cycle_in_database_sync()
                 
                 logger.info(f"✅ DATABASE UPDATED SUCCESSFULLY for cycle {cycle.cycle_id}")
                 logger.info(f"   🔒 Cycle marked as CLOSED in PocketBase with take_profit reason")
@@ -3250,13 +3271,9 @@ class AdvancedCyclesTrader(Strategy):
             # Update cycle state to normal operation
             cycle.in_recovery_mode = False
             
-            # Update cycle in database (run async method in thread)
+            # Update cycle in database using synchronous method
             try:
-                import asyncio
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                loop.run_until_complete(self._update_cycle_in_database(cycle))
-                loop.close()
+                cycle._update_cycle_in_database_sync()
             except Exception as db_error:
                 logger.error(f"❌ Failed to update database for recovery mode exit - cycle {cycle_id}: {db_error}")
                 # Continue with recovery mode exit even if database update fails
