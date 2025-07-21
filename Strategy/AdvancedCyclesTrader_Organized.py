@@ -1745,29 +1745,54 @@ class AdvancedCyclesTrader(Strategy):
                 # Use zone engine to detect breaches
                 cycle._update_price_extremes(current_price)
                 if cycle.current_direction == "BUY":
-                    zone_status = self.zone_engine.detect_zone_breach(current_price, cycle.highest_buy_price,self.order_interval_pips)
+                    last_buy_price = None
+                    if cycle.highest_buy_price < current_price:
+                        last_buy_price = cycle.highest_buy_price
+                    else:
+                        if cycle.lowest_buy_price > current_price:
+                            last_buy_price = cycle.lowest_buy_price
+                            
+                    # Only check for zone breach if we have a valid reference price
+                    if last_buy_price is not None:
+                        zone_status = self.zone_engine.detect_zone_breach(current_price, last_buy_price, self.order_interval_pips)
+                    else:
+                        if len(cycle.active_orders) > 0:
+                            zone_status = {'breach_detected': False}
+                        else:
+                            zone_status = {'breach_detected': True}
+                        
                 elif cycle.current_direction == "SELL":
-                    zone_status = self.zone_engine.detect_zone_breach(current_price, cycle.lowest_sell_price,self.order_interval_pips)
+                    last_sell_price = None
+                    if cycle.lowest_sell_price > current_price:
+                        last_sell_price = cycle.lowest_sell_price
+                    else:
+                        if cycle.highest_sell_price < current_price:
+                            last_sell_price = cycle.highest_sell_price
+                            
+                    # Only check for zone breach if we have a valid reference price
+                    if last_sell_price is not None:
+                        zone_status = self.zone_engine.detect_zone_breach(current_price, last_sell_price, self.order_interval_pips)
+                    else:
+                        if len(cycle.active_orders) > 0:
+                            zone_status = {'breach_detected': False}
+                        else:
+                            zone_status = {'breach_detected': True}
                 
+                # Get breach direction and price before checking breach detection
+                breach_direction = zone_status.get('breach_direction')
+                breach_price = current_price
+
                 if zone_status.get('breach_detected', False):
                     logger.info(f"Zone breach detected: {zone_status}")
-                    # Handle zone breach logic here
-                    #it should place new order in the same cycle directin
-                    # Place new order in the same direction as the cycle
-                    breach_direction = zone_status['breach_direction']
-                    breach_price = current_price
-                    if cycle.current_direction == breach_direction:
+                
+                # Place new order in the same direction as the cycle
+                    if cycle.current_direction == "BUY":
+                        self._place_buy_order_sync(cycle, breach_price)
+                    elif cycle.current_direction == "SELL":
+                        self._place_sell_order_sync(cycle, breach_price)
                     
-                        # Place order in the same direction as the cycle
-                        if breach_direction == "BUY":
-                            self._place_buy_order_sync(cycle, breach_price)
-                        elif breach_direction == "SELL":
-                            self._place_sell_order_sync(cycle, breach_price)
-                        
-                        logger.info(f"Zone breach order placed in cycle {cycle.cycle_id} direction: {breach_direction}")
-                    else:
-                        logger.warning(f"No active cycle found for breach direction: {breach_direction}")
-
+                    logger.info(f"Zone breach order placed in cycle {cycle.cycle_id} direction: {breach_direction}")
+                  
         except Exception as e:
             logger.error(f"Error checking zone breaches: {e}")
 
@@ -2609,7 +2634,7 @@ class AdvancedCyclesTrader(Strategy):
             
             # Update cycle in database using synchronous method
             try:
-                cycle._update_cycle_in_database_sync()
+                cycle._update_cycle_in_database()
                 logger.info(f"✅ Database updated for recovery mode setup - cycle {cycle.cycle_id}")
             except Exception as db_error:
                 logger.error(f"❌ Failed to update database for recovery mode setup - cycle {cycle.cycle_id}: {db_error}")
@@ -2921,7 +2946,7 @@ class AdvancedCyclesTrader(Strategy):
                 logger.info(f"   - close_reason: {cycle.close_reason}")
                 logger.info(f"   - close_time: {cycle.close_time}")
                 
-                cycle._update_cycle_in_database_sync()
+                cycle._update_cycle_in_database()
                 
                 logger.info(f"✅ DATABASE UPDATED SUCCESSFULLY for cycle {cycle.cycle_id}")
                 logger.info(f"   🔒 Cycle marked as CLOSED in PocketBase with take_profit reason")
@@ -3156,9 +3181,6 @@ class AdvancedCyclesTrader(Strategy):
                 
                 logger.info(f"Recovery buy order placed: {order_data[0].ticket}")
                 
-                # # Exit recovery mode after first recovery order is successfully placed
-                # self._exit_recovery_mode_after_first_order(cycle.cycle_id, cycle)
-                
         except Exception as e:
             logger.error(f"Error placing recovery buy order: {e}")
 
@@ -3211,9 +3233,6 @@ class AdvancedCyclesTrader(Strategy):
                 
                 logger.info(f"Recovery sell order placed: {order_data[0].ticket}")
                 
-                # # Exit recovery mode after first recovery order is successfully placed
-                # self._exit_recovery_mode_after_first_order(cycle.cycle_id, cycle)
-                
         except Exception as e:
             logger.error(f"Error placing recovery sell order: {e}")
 
@@ -3241,15 +3260,20 @@ class AdvancedCyclesTrader(Strategy):
                     
                     # Close the opposite direction order
                     try:
-                        ticket = order.get('ticket')
-                        if ticket:
-                            close_result = self.meta_trader.close_position(ticket)
+                        if order:
+                            close_result = self.meta_trader.close_position({
+                                'ticket': order.get('ticket'),
+                                'symbol': order.get('symbol'),
+                                'type': 0 if order.get('direction') == 'SELL' else 1,  # 0 for BUY, 1 for SELL
+                                'volume': order.get('volume'),
+                                'magic_number': order.get('magic_number')
+                            })
                             if close_result:
                                 order['status'] = 'closed'
                                 orders_closed += 1
-                                logger.info(f"Closed opposite direction recovery order {ticket} ({opposite_direction}) when activating {recovery_direction} recovery")
+                                logger.info(f"Closed opposite direction recovery order {order.get('ticket')} ({opposite_direction}) when activating {recovery_direction} recovery")
                             else:
-                                logger.warning(f"Failed to close opposite direction recovery order {ticket}")
+                                logger.warning(f"Failed to close opposite direction recovery order {order.get('ticket')}")
                     except Exception as close_error:
                         logger.error(f"Error closing opposite direction recovery order {order.get('ticket')}: {close_error}")
             
@@ -3273,7 +3297,7 @@ class AdvancedCyclesTrader(Strategy):
             
             # Update cycle in database using synchronous method
             try:
-                cycle._update_cycle_in_database_sync()
+                cycle._update_cycle_in_database()
             except Exception as db_error:
                 logger.error(f"❌ Failed to update database for recovery mode exit - cycle {cycle_id}: {db_error}")
                 # Continue with recovery mode exit even if database update fails

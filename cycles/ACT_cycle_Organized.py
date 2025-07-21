@@ -91,8 +91,9 @@ class AdvancedCycle(cycle):
         self.direction_switched = cycle_data.get("direction_switched", False)
         self.done_price_levels = cycle_data.get("done_price_levels", [])
         self.next_order_index = cycle_data.get("next_order_index", 1)
-        
-        # Trading parameters
+        self.entry_price = cycle_data.get("entry_price", 0.0)
+
+        # Trading parameters    
         self.reversal_threshold_pips = cycle_data.get("reversal_threshold_pips", 50.0)
         self.order_interval_pips = cycle_data.get("order_interval_pips", 50.0)
         self.initial_order_stop_loss = cycle_data.get("initial_order_stop_loss", 300.0)
@@ -126,13 +127,19 @@ class AdvancedCycle(cycle):
         """Initialize reversal trading properties"""
         self.reversal_threshold_pips = cycle_data.get("reversal_threshold_pips", 50.0)
         self.highest_buy_price = cycle_data.get("highest_buy_price", 0.0)
+        self.lowest_buy_price = cycle_data.get("lowest_buy_price", float('inf'))
+        self.highest_sell_price = cycle_data.get("highest_sell_price", 0.0)
         self.lowest_sell_price = cycle_data.get("lowest_sell_price", float('inf'))
         self.reversal_count = cycle_data.get("reversal_count", 0)
         self.closed_orders_pl = cycle_data.get("closed_orders_pl", 0.0)
         self.open_orders_pl = cycle_data.get("open_orders_pl", 0.0)
         self.total_cycle_pl = cycle_data.get("total_cycle_pl", 0.0)
         self.last_reversal_time = cycle_data.get("last_reversal_time", None)
-        self.reversal_history = cycle_data.get("reversal_history", [])
+        
+        # Ensure reversal_history is always initialized as a list
+        reversal_history = cycle_data.get("reversal_history")
+        self.reversal_history = reversal_history if isinstance(reversal_history, list) else []
+        
         self.initial_order_stop_loss = cycle_data.get("initial_order_stop_loss", 300.0)
         self.cycle_interval = cycle_data.get("cycle_interval", 100.0)
         
@@ -666,13 +673,52 @@ class AdvancedCycle(cycle):
         try:
             # Update highest buy price from active buy orders
             self._update_highest_buy_price_from_orders()
-            
+            # Update highest sell price from active sell orders
+            self._update_highest_sell_price_from_orders()
             # Update lowest sell price from active sell orders
             self._update_lowest_sell_price_from_orders()
+            # Update lowest buy price from active buy orders
+            self._update_lowest_buy_price_from_orders()
                     
         except Exception as e:
             logger.error(f"Error updating price extremes: {e}")
-    
+
+    def _update_highest_sell_price_from_orders(self):
+        """Update highest_sell_price to be the open price of the highest active sell order"""
+        try:
+            sell_orders = [
+                order for order in self.active_orders 
+                if order.get('direction', '').upper() == 'SELL' or order.get('type', 0) == 1
+            ]
+            if sell_orders:
+                # Find the order with the highest open price
+                highest_order = max(sell_orders, key=lambda order: order.get('open_price', 0.0))
+                self.highest_sell_price = highest_order.get('open_price', 0.0)
+            else:
+                self.highest_sell_price = 0.0
+
+        except Exception as e:
+            logger.error(f"Error updating highest sell price from orders: {e}")
+            self.highest_sell_price = 0.0
+
+    def _update_lowest_buy_price_from_orders(self):
+        """Update lowest_buy_price to be the open price of the lowest active buy order"""
+        try:
+            buy_orders = [
+                order for order in self.active_orders 
+                if order.get('direction', '').upper() == 'BUY' or order.get('type', 0) == 0
+            ]
+            if buy_orders:
+                # Find the order with the lowest open price
+                lowest_order = min(buy_orders, key=lambda order: order.get('open_price', float('inf')))
+                self.lowest_buy_price = self._safe_float_conversion(lowest_order.get('open_price', 999999999.0))
+            else:
+                # Use large finite number instead of infinity
+                self.lowest_buy_price = 999999999.0
+        except Exception as e:
+            logger.error(f"Error updating lowest buy price from orders: {e}")
+            self.lowest_buy_price = 999999999.0
+
     def _update_highest_buy_price_from_orders(self):
         """Update highest_buy_price to be the open price of the highest active buy order"""
         try:
@@ -690,7 +736,7 @@ class AdvancedCycle(cycle):
                 
         except Exception as e:
             logger.error(f"Error updating highest buy price from orders: {e}")
-    
+
     def _update_lowest_sell_price_from_orders(self):
         """Update lowest sell price from active sell orders"""
         try:
@@ -1088,8 +1134,7 @@ class AdvancedCycle(cycle):
                 "initial_order_stop_loss": self._safe_getattr_float('initial_order_stop_loss', 300.0),
                 "cycle_interval": self._safe_getattr_float('cycle_interval', 100.0),
                 "opened_by":self.opened_by,
-                "close_reason":self.close_reason,
-                "closing_method":self.closing_method,
+           
                
              
             }
