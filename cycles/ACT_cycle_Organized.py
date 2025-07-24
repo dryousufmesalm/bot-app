@@ -33,17 +33,246 @@ class AdvancedCycle(cycle):
     - Real-time synchronization with MetaTrader
     """
 
-    def __init__(self, cycle_data, meta_trader, bot):
+    def __init__(self, cycle_data=None, meta_trader=None, bot=None):
         """Initialize Advanced Cycle with enhanced features"""
-        self._validate_initialization_parameters(cycle_data, meta_trader, bot)
-        self._initialize_base_cycle(cycle_data, meta_trader, bot)
-        self._initialize_advanced_properties(cycle_data)
-        self._initialize_reversal_properties(cycle_data)
-        self._initialize_database_components()
-        self._validate_initialization()
+        self.bot = bot
+        self.meta_trader = meta_trader
         
-        logger.info(f"AdvancedCycle initialized with ID: {self.cycle_id}")
+        # Initialize all fields with defaults
+        self._initialize_defaults()
+        
+        # If cycle data provided, initialize from it
+        if cycle_data:
+            self._initialize_cycle_data(cycle_data)
+            
+        logger.info(f"AdvancedCycle initialized with ID: {getattr(self, 'cycle_id', 'NEW')}")
+        
+    def _validate_cycle_data(self, cycle_data):
+        """Validate required fields in cycle data"""
+        required_fields = ['symbol', 'direction']
+        for field in required_fields:
+            if field not in cycle_data:
+                raise ValueError(f"Missing required field: {field}")
+                
+    def _parse_json_field(self, field_value, default_value=None):
+        """Parse a JSON field safely"""
+        try:
+            if isinstance(field_value, str):
+                return json.loads(field_value)
+            elif field_value is None:
+                return default_value
+            return field_value
+        except Exception as e:
+            logger.error(f"Error parsing JSON field: {e}")
+            return default_value
+            
+    def _initialize_cycle_data(self, cycle_data):
+        """Initialize cycle data from database record"""
+        try:
+            # Initialize defaults first
+            self._initialize_defaults()
+            
+            # Ensure direction_switches is a list
+            direction_switches_data = cycle_data.get('direction_switches')
+            if isinstance(direction_switches_data, (int, float)):
+                # Convert old integer format to list format
+                self.direction_switches = []
+            else:
+                # Parse as JSON if it's a string, otherwise use empty list
+                self.direction_switches = self._parse_json_field(direction_switches_data, [])
 
+            # Basic cycle info
+            self.cycle_id = cycle_data.get('id')
+            self.account_id = cycle_data.get('account')
+            self.bot_id = cycle_data.get('bot')
+            self.is_closed = bool(cycle_data.get('is_closed', False))
+            self.is_favorite = bool(cycle_data.get('is_favorite', False))
+            self.symbol = cycle_data.get('symbol')
+            self.price_level = float(cycle_data.get('price_level', 0.0))  # Added price level restoration
+            
+            # Status handling
+            self.status = cycle_data.get('status', 'ACTIVE')
+            self.is_active = not self.is_closed and self.status == 'ACTIVE'
+            
+            # JSON fields
+            self.opened_by = self._parse_json_field(cycle_data.get('opened_by'), {})
+            self.closing_method = self._parse_json_field(cycle_data.get('closing_method'), {})
+            self.orders = self._parse_json_field(cycle_data.get('orders'), [])
+            self.orders_config = self._parse_json_field(cycle_data.get('orders_config'), {})
+            self.active_orders = self._parse_json_field(cycle_data.get('active_orders'), [])
+            self.completed_orders = self._parse_json_field(cycle_data.get('completed_orders'), [])
+            self.done_price_levels = self._parse_json_field(cycle_data.get('done_price_levels'), [])
+            
+            # Direction and zone settings
+            self.direction = cycle_data.get('direction', 'BUY')
+            self.current_direction = cycle_data.get('current_direction', self.direction)
+            self.zone_base_price = float(cycle_data.get('zone_base_price', 0.0))
+            self.initial_threshold_price = float(cycle_data.get('initial_threshold_price', 0.0))
+            self.zone_threshold_pips = float(cycle_data.get('zone_threshold_pips', 0.0))
+            self.order_interval_pips = float(cycle_data.get('order_interval_pips', 0.0))
+            self.batch_stop_loss_pips = float(cycle_data.get('batch_stop_loss_pips', 0.0))
+            self.zone_range_pips = float(cycle_data.get('zone_range_pips', 0.0))
+            
+            # Price bounds and levels
+            self.lower_bound = float(cycle_data.get('lower_bound', 0.0))
+            self.upper_bound = float(cycle_data.get('upper_bound', 0.0))
+            self.entry_price = float(cycle_data.get('entry_price', 0.0))
+            self.stop_loss = float(cycle_data.get('stop_loss', 0.0))
+            self.take_profit = float(cycle_data.get('take_profit', 0.0))
+            self.lot_size = float(cycle_data.get('lot_size', 0.0))
+            
+            # Order tracking
+            self.next_order_index = int(cycle_data.get('next_order_index', 0))
+            self.current_batch_id = cycle_data.get('current_batch_id')
+            self.last_order_price = float(cycle_data.get('last_order_price', 0.0))
+            self.last_order_time = cycle_data.get('last_order_time')
+            
+            # Loss tracking
+            self.accumulated_loss = float(cycle_data.get('accumulated_loss', 0.0))
+            self.batch_losses = float(cycle_data.get('batch_losses', 0.0))
+            
+            # Closing info
+            self.close_reason = cycle_data.get('close_reason', '')
+            self.close_time = cycle_data.get('close_time')
+            
+            # Order statistics
+            self.total_orders = int(cycle_data.get('total_orders', 0))
+            self.profitable_orders = int(cycle_data.get('profitable_orders', 0))
+            self.loss_orders = int(cycle_data.get('loss_orders', 0))
+            self.duration_minutes = int(cycle_data.get('duration_minutes', 0))
+            
+            # Reversal trading
+            self.reversal_threshold_pips = float(cycle_data.get('reversal_threshold_pips', 0.0))
+            self.highest_buy_price = float(cycle_data.get('highest_buy_price', 0.0))
+            self.lowest_sell_price = float(cycle_data.get('lowest_sell_price', float('inf')))
+            self.reversal_count = int(cycle_data.get('reversal_count', 0))
+            self.closed_orders_pl = float(cycle_data.get('closed_orders_pl', 0.0))
+            self.open_orders_pl = float(cycle_data.get('open_orders_pl', 0.0))
+            self.total_cycle_pl = float(cycle_data.get('total_cycle_pl', 0.0))
+            self.last_reversal_time = cycle_data.get('last_reversal_time')
+            self.reversal_history = self._parse_json_field(cycle_data.get('reversal_history'), [])
+            
+            # Recovery mode
+            self.in_recovery_mode = bool(cycle_data.get('in_recovery_mode', False))
+            self.recovery_activated = bool(cycle_data.get('recovery_activated', False))
+            self.reversal_threshold_from_recovery = bool(cycle_data.get('reversal_threshold_from_recovery', False))
+            self.recovery_direction = cycle_data.get('recovery_direction')
+            self.initial_direction = cycle_data.get('initial_direction', cycle_data.get('direction', 'BUY'))
+            self.placed_levels = self._parse_json_field(cycle_data.get('placed_levels'), [])
+            self.initial_order_data = self._parse_json_field(cycle_data.get('initial_order_data'), {})
+            self.recovery_zone_base_price = float(cycle_data.get('recovery_zone_base_price', 0.0))
+            self.initial_stop_loss_price = float(cycle_data.get('initial_stop_loss_price', 0.0))
+            self.initial_order_open_price = float(cycle_data.get('initial_order_open_price', 0.0))
+            self.initial_order_stop_loss = float(cycle_data.get('initial_order_stop_loss', 0.0))
+            self.lot_idx = int(cycle_data.get('lot_idx', 0))
+            
+            # Configuration
+            self.cycle_type = cycle_data.get('cycle_type', 'ACT')
+            self.magic_number = int(cycle_data.get('magic_number', 0))
+            
+            logger.info(f"Successfully initialized cycle {self.cycle_id} from database record")
+            
+        except Exception as e:
+            logger.error(f"Error initializing cycle data: {e}")
+            raise
+
+    def _initialize_defaults(self):
+        """Initialize all fields with default values"""
+        # Basic cycle info
+        self.cycle_id = None
+        self.account_id = None
+        self.bot_id = None
+        self.is_closed = False
+        self.is_favorite = False
+        self.is_active = True  # Default to active
+        self.symbol = None
+        self.opened_by = {}
+        self.closing_method = {}
+        self.lot_idx = 0
+        self.status = 'ACTIVE'
+        
+        # Price bounds
+        self.lower_bound = 0.0
+        self.upper_bound = 0.0
+        
+        # Volume and profit
+        self.total_volume = 0.0
+        self.total_profit = 0.0
+        
+        # Orders and configuration
+        self.orders = []
+        self.orders_config = {}
+        self.cycle_type = 'ACT'
+        self.magic_number = 0
+        
+        # Price levels
+        self.entry_price = 0.0
+        self.stop_loss = 0.0
+        self.take_profit = 0.0
+        self.lot_size = 0.0
+        self.price_level = 0.0  # Added price level field
+        
+        # Direction and zone settings
+        self.direction = 'BUY'
+        self.current_direction = 'BUY'
+        self.direction_switches = []  # Track direction switches
+        self.direction_switched = False
+        self.zone_base_price = 0.0
+        self.initial_threshold_price = 0.0
+        self.zone_threshold_pips = 0.0
+        self.order_interval_pips = 0.0
+        self.batch_stop_loss_pips = 0.0
+        self.zone_range_pips = 0.0
+        
+        # Order tracking
+        self.next_order_index = 0
+        self.done_price_levels = []
+        self.active_orders = []
+        self.completed_orders = []
+        self.current_batch_id = None
+        
+        # Last order info
+        self.last_order_price = 0.0
+        self.last_order_time = None
+        
+        # Loss tracking
+        self.accumulated_loss = 0.0
+        self.batch_losses = 0.0
+        
+        # Closing info
+        self.close_reason = ''
+        self.close_time = None
+        
+        # Order statistics
+        self.total_orders = 0
+        self.profitable_orders = 0
+        self.loss_orders = 0
+        self.duration_minutes = 0
+        
+        # Reversal trading
+        self.reversal_threshold_pips = 0.0
+        self.highest_buy_price = 0.0
+        self.lowest_sell_price = float('inf')
+        self.reversal_count = 0
+        self.closed_orders_pl = 0.0
+        self.open_orders_pl = 0.0
+        self.total_cycle_pl = 0.0
+        self.last_reversal_time = None
+        self.reversal_history = []
+        
+        # Recovery mode
+        self.in_recovery_mode = False
+        self.recovery_zone_base_price = 0.0
+        self.initial_stop_loss_price = 0.0
+        self.initial_order_stop_loss = 0.0
+        self.recovery_activated = False
+        self.reversal_threshold_from_recovery = False
+        self.recovery_direction = None
+        self.initial_direction = None
+        self.initial_order_open_price = 0.0
+        self.placed_levels = []
+        self.initial_order_data = {}
+        
     # ==================== INITIALIZATION METHODS ====================
 
     def _validate_initialization_parameters(self, cycle_data, meta_trader, bot):
@@ -115,7 +344,7 @@ class AdvancedCycle(cycle):
         # Loss tracking
         self.accumulated_loss = 0.0
         self.batch_losses = []
-        self.direction_switches = 0
+        self.direction_switches = []
         
         # Zone state
         self.zone_activated = cycle_data.get("zone_activated", False)
@@ -143,10 +372,17 @@ class AdvancedCycle(cycle):
         self.initial_order_stop_loss = cycle_data.get("initial_order_stop_loss", 300.0)
         self.cycle_interval = cycle_data.get("cycle_interval", 100.0)
         
-        # Recovery mode properties (NEW)
+        # Recovery mode properties
         self.in_recovery_mode = cycle_data.get("in_recovery_mode", False)
         self.recovery_zone_base_price = cycle_data.get("recovery_zone_base_price", None)
         self.initial_stop_loss_price = cycle_data.get("initial_stop_loss_price", None)
+        self.recovery_activated = cycle_data.get("recovery_activated", False)
+        self.recovery_direction = cycle_data.get("recovery_direction", None)
+        self.initial_direction = cycle_data.get("initial_direction", self.current_direction)
+        self.initial_order_open_price = cycle_data.get("initial_order_open_price", 0.0)
+        self.initial_order_data = cycle_data.get("initial_order_data", {})
+        self.placed_levels = set(cycle_data.get("placed_levels", []))
+        self.reversal_threshold_from_recovery = cycle_data.get("reversal_threshold_from_recovery", False)
 
     def _initialize_database_components(self):
         """Initialize in-memory components"""
@@ -181,8 +417,8 @@ class AdvancedCycle(cycle):
             # Update price extremes based on new order
             self._update_price_extremes(0.0)  # Current price not needed for order-based calculation
             
-            # Update cycle in PocketBase database
-            self._update_cycle_in_database()
+            # # Update cycle in PocketBase database
+            # self._update_cycle_in_database()
             
             # Log order addition
             logger.info(f"Order {order_data.get('ticket')} added to cycle {self.cycle_id}")
@@ -303,21 +539,11 @@ class AdvancedCycle(cycle):
         }
 
     def _safe_float_conversion(self, value, default=0.0) -> float:
-        """Safely convert value to float with infinity handling"""
-        if value is None:
-            return default
-        
+        """Safely convert a value to float"""
         try:
-            float_val = float(value)
-            # Check for infinity or NaN
-            if float_val == float('inf'):
-                return 999999999.0  # Large number instead of infinity
-            elif float_val == float('-inf'):
-                return -999999999.0  # Large negative number instead of negative infinity
-            elif float_val != float_val:  # NaN check
+            if value is None:
                 return default
-            else:
-                return float_val
+            return float(value)
         except (ValueError, TypeError):
             return default
 
@@ -386,8 +612,7 @@ class AdvancedCycle(cycle):
             # Update price extremes
             self._update_price_extremes(0.0)
             
-            # Update database with new profit information
-            self._update_cycle_in_database()
+        
             
         except Exception as e:
             logger.error(f"Error updating cycle statistics after order add: {e}")
@@ -769,8 +994,8 @@ class AdvancedCycle(cycle):
             # Switch direction
             self.switch_direction(reversal_direction, "reversal")
             
-            # Update cycle in PocketBase database
-            self._update_cycle_in_database()
+            # # Update cycle in PocketBase database
+            # self._update_cycle_in_database()
             
             # Log reversal completion
             logger.info(f"Reversal completed: {closed_orders_count} orders closed, direction switched to {reversal_direction}")
@@ -880,17 +1105,39 @@ class AdvancedCycle(cycle):
     # ==================== DIRECTION MANAGEMENT ====================
 
     def switch_direction(self, new_direction: str, reason: str):
-        """Switch trading direction"""
+        """Switch cycle direction and record the change"""
         try:
-            old_direction = self.current_direction
+            # Ensure direction_switches is a list
+            if not isinstance(self.direction_switches, list):
+                self.direction_switches = []
+                
+            # Record the direction switch
+            switch_data = {
+                'from_direction': self.current_direction,
+                'to_direction': new_direction,
+                'reason': reason,
+                'timestamp': datetime.datetime.now().isoformat(),
+                'price': self.last_order_price
+            }
+            self.direction_switches.append(switch_data)
+            
+            # Update direction
+            self.direction = new_direction
             self.current_direction = new_direction
             self.direction_switched = True
-            self.direction_switches += 1
             
-            logger.info(f"Direction switched from {old_direction} to {new_direction}: {reason}")
+            logger.info(f"Switched direction from {switch_data['from_direction']} to {switch_data['to_direction']} - Reason: {reason}")
             
         except Exception as e:
             logger.error(f"Error switching direction: {e}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
+            # Ensure direction_switches is a list even after error
+            if not isinstance(self.direction_switches, list):
+                self.direction_switches = []
+            
+        # Update database
+        self._update_cycle_in_database()
 
     # ==================== ZONE MANAGEMENT ====================
 
@@ -946,116 +1193,128 @@ class AdvancedCycle(cycle):
 
     # ==================== DATABASE OPERATIONS ====================
 
+    def _serialize_data(self, data):
+        """Serialize data for database storage"""
+        try:
+            if data is None:
+                return None
+            if isinstance(data, (list, tuple)):
+                return [self._serialize_data(item) for item in data]
+            if isinstance(data, dict):
+                return {k: self._serialize_data(v) for k, v in data.items()}
+            if isinstance(data, (datetime.datetime, datetime.date)):
+                return self._safe_datetime_string(data)
+            if isinstance(data, (int, float, str, bool)):
+                return data
+            # Try to convert to dict if object has __dict__
+            if hasattr(data, '__dict__'):
+                return self._serialize_data(data.__dict__)
+            return str(data)
+        except Exception as e:
+            logger.error(f"Error serializing data: {e}")
+            return None
+            
     def _update_cycle_in_database(self):
-        """Update cycle in PocketBase database with latest profit information"""
+        """Update cycle in database"""
         try:
             if not self.cycle_id:
                 logger.error("❌ Cannot update cycle in database: No cycle_id available")
                 return False
                 
-            if not (hasattr(self.bot, 'api_client') and self.bot.api_client):
+            if not (hasattr(self.bot, 'client') and self.bot.client):
                 logger.error("No API client available for database operations")
                 return False
                 
-            api_client = self.bot.api_client
+            api_client = self.bot.client
             
             # Ensure profits are up to date before saving
             self._recalculate_total_profit()
             
-            # Prepare comprehensive update data with latest profit information
-            update_data = {
-                # Order data with latest information
-                "active_orders": json.dumps(serialize_datetime_objects(self.active_orders)),
-                "completed_orders": json.dumps(serialize_datetime_objects(self.completed_orders)),
-                "orders": json.dumps(serialize_datetime_objects(self.active_orders + self.completed_orders)),
-                
-                # Comprehensive profit tracking
-                "total_profit": self._safe_float_conversion(self.total_profit, 0.0),
-                "open_orders_pl": self._safe_float_conversion(self.open_orders_pl, 0.0),
-                "closed_orders_pl": self._safe_float_conversion(self.closed_orders_pl, 0.0),
-                "total_cycle_pl": self._safe_float_conversion(self.total_cycle_pl, 0.0),
-                
-                # Order and volume statistics
-                "total_orders": len(self.active_orders) + len(self.completed_orders),
-                "active_orders_count": len(self.active_orders),
-                "completed_orders_count": len(self.completed_orders),
-                "total_volume": self._safe_float_conversion(sum(float(order.get('volume', 0.0)) for order in self.active_orders + self.completed_orders)),
-                
-                # Status information
-                "status": "active" if self.is_active else "inactive",
-                "is_closed": self.is_closed,
-                "is_active": self.is_active,
-                
-                # Direction and trading state
-                "direction": self.current_direction,
-                "current_direction": self.current_direction,
-                "direction_switched": bool(getattr(self, 'direction_switched', False)),
-                "direction_switches": int(getattr(self, 'direction_switches', 0)),
-                
-                # Zone and order management
-                "next_order_index": int(getattr(self, 'next_order_index', 1)),
-                "accumulated_loss": self._safe_float_conversion(getattr(self, 'accumulated_loss', 0.0)),
-                "last_order_price": self._safe_float_conversion(getattr(self, 'last_order_price', 0.0)),
-                "zone_activated": bool(getattr(self, 'zone_activated', False)),
-                "initial_threshold_breached": bool(getattr(self, 'initial_threshold_breached', False)),
-                "zone_based_losses": self._safe_float_conversion(getattr(self, 'zone_based_losses', 0.0)),
-                "batch_stop_loss_triggers": int(getattr(self, 'batch_stop_loss_triggers', 0)),
-                "current_batch_id": str(getattr(self, 'current_batch_id', '')),
-                
-                # Reversal trading information
-                "reversal_count": int(getattr(self, 'reversal_count', 0)),
-                "highest_buy_price": self._safe_float_conversion(getattr(self, 'highest_buy_price', 0.0)),
-                "lowest_sell_price": self._safe_float_conversion(getattr(self, 'lowest_sell_price', float('inf'))),
-                "reversal_threshold_pips": self._safe_float_conversion(getattr(self, 'reversal_threshold_pips', 50.0)),
-                
-                # Recovery mode fields
-                "in_recovery_mode": getattr(self, 'in_recovery_mode', False),
-                "recovery_zone_base_price": self._safe_float_conversion(getattr(self, 'recovery_zone_base_price', 0.0)),
-                "initial_stop_loss_price": self._safe_float_conversion(getattr(self, 'initial_stop_loss_price', 0.0)),
-                
-                # Configuration
-                "order_interval_pips": self._safe_float_conversion(getattr(self, 'order_interval_pips', 50.0)),
-                "initial_order_stop_loss": self._safe_float_conversion(getattr(self, 'initial_order_stop_loss', 300.0)),
-                "cycle_interval": self._safe_float_conversion(getattr(self, 'cycle_interval', 100.0)),
-                
-                # Timestamp
-                "updated": datetime.datetime.now().isoformat()
+            # Ensure direction_switches is a list before serializing
+            if not isinstance(self.direction_switches, list):
+                self.direction_switches = []
+            
+            # Prepare data for database update
+            data = {
+                'id': self.cycle_id,
+                'bot': str(self.bot_id),
+                'account': str(self.account_id),
+                'symbol': self.symbol,
+                'is_closed': self.is_closed,
+                'is_favorite': getattr(self, 'is_favorite', False),
+                'status': getattr(self, 'status', 'closed' if self.is_closed else 'active'),
+                'magic_number': getattr(self.bot, 'magic_number', 0),
+                'entry_price': self._safe_float_conversion(getattr(self, 'entry_price', 0.0)),
+                'price_level': self._safe_float_conversion(getattr(self, 'price_level', 0.0)),  # Added price level
+                'stop_loss': self._safe_float_conversion(getattr(self, 'stop_loss', 0.0)),
+                'take_profit': self._safe_float_conversion(getattr(self, 'take_profit', 0.0)),
+                'lot_size': self._safe_float_conversion(getattr(self, 'lot_size', self.bot.configs['lot_size'])),
+                'direction': self.current_direction,
+                'current_direction': self.current_direction,
+                'direction_switched': getattr(self, 'direction_switched', False),
+                'direction_switches': self._serialize_data(self.direction_switches),  # Now always a list
+                'zone_base_price': self._safe_float_conversion(getattr(self, 'zone_base_price', 0.0)),
+                'initial_threshold_price': self._safe_float_conversion(getattr(self, 'initial_threshold_price', 0.0)),
+                'zone_threshold_pips': self._safe_float_conversion(getattr(self, 'zone_threshold_pips', self.bot.configs['reversal_threshold_pips'])),
+                'order_interval_pips': self._safe_float_conversion(getattr(self, 'order_interval_pips', self.bot.configs['order_interval_pips'])),
+                'batch_stop_loss_pips': self._safe_float_conversion(getattr(self, 'initial_order_stop_loss', self.bot.configs['initial_order_stop_loss_pips'])),
+                'zone_range_pips': self._safe_float_conversion(getattr(self, 'cycle_interval', self.bot.configs['cycle_interval_pips'])),
+                'lot_idx': int(getattr(self, 'lot_idx', 0)),
+                'lower_bound': self._safe_float_conversion(getattr(self, 'lower_bound', 0.0)),
+                'upper_bound': self._safe_float_conversion(getattr(self, 'upper_bound', 0.0)),
+                'next_order_index': int(getattr(self, 'next_order_index', 1)),
+                'current_batch_id': str(getattr(self, 'current_batch_id', '')),
+                'total_volume': self._safe_float_conversion(getattr(self, 'total_volume', 0.0)),
+                'total_profit': self._safe_float_conversion(getattr(self, 'total_profit', 0.0)),
+                'accumulated_loss': self._safe_float_conversion(getattr(self, 'accumulated_loss', 0.0)),
+                'batch_losses': self._safe_float_conversion(getattr(self, 'batch_losses', 0.0)),
+                'total_orders': len(getattr(self, 'active_orders', [])) + len(getattr(self, 'completed_orders', [])),
+                'profitable_orders': int(getattr(self, 'profitable_orders', 0)),
+                'loss_orders': int(getattr(self, 'loss_orders', 0)),
+                'duration_minutes': int(getattr(self, 'duration_minutes', 0)),
+                'reversal_threshold_pips': self._safe_float_conversion(getattr(self, 'reversal_threshold_pips', 300.0)),
+                'highest_buy_price': self._safe_float_conversion(getattr(self, 'highest_buy_price', 0.0)),
+                'lowest_sell_price': self._safe_float_conversion(getattr(self, 'lowest_sell_price', 999999999.0)),
+                'reversal_count': int(getattr(self, 'reversal_count', 0)),
+                'closed_orders_pl': self._safe_float_conversion(getattr(self, 'closed_orders_pl', 0.0)),
+                'open_orders_pl': self._safe_float_conversion(getattr(self, 'open_orders_pl', 0.0)),
+                'total_cycle_pl': self._safe_float_conversion(getattr(self, 'total_cycle_pl', 0.0)),
+                'in_recovery_mode': getattr(self, 'in_recovery_mode', False),
+                'recovery_zone_base_price': self._safe_float_conversion(getattr(self, 'recovery_zone_base_price', 0.0)),
+                'initial_stop_loss_price': self._safe_float_conversion(getattr(self, 'initial_stop_loss_price', 0.0)),
+                'recovery_activated': getattr(self, 'recovery_activated', False),
+                'recovery_direction': getattr(self, 'recovery_direction', None),
+                'placed_levels': self._serialize_data(getattr(self, 'placed_levels', [])),
+                'initial_order_open_price': self._safe_float_conversion(getattr(self, 'initial_order_open_price', 0.0)),
+                'initial_direction': getattr(self, 'initial_direction', None),
+                'initial_order_data': self._serialize_data(getattr(self, 'initial_order_data', {})),
+                'reversal_threshold_from_recovery': getattr(self, 'reversal_threshold_from_recovery', False),
+                'last_reversal_time': self._safe_datetime_string(getattr(self, 'last_reversal_time', None)),
+                'last_order_time': self._safe_datetime_string(getattr(self, 'last_order_time', None)),
+                'close_time': self._safe_datetime_string(getattr(self, 'close_time', None)),
+                'close_reason': getattr(self, 'close_reason', ''),
+                'closing_method': self._serialize_data(getattr(self, 'closing_method', {})),
+                'opened_by': self._serialize_data(getattr(self, 'opened_by', {})),
+                'cycle_type': getattr(self, 'cycle_type', 'ACT'),
+                'last_order_price': self._safe_float_conversion(getattr(self, 'last_order_price', 0.0)),
+                'orders': self._serialize_data(getattr(self, 'active_orders', []) + getattr(self, 'completed_orders', [])),
+                'active_orders': self._serialize_data(getattr(self, 'active_orders', [])),
+                'completed_orders': self._serialize_data(getattr(self, 'completed_orders', [])),
+                'orders_config': self._serialize_data(getattr(self, 'orders_config', {})),
+                'done_price_levels': self._serialize_data(getattr(self, 'done_price_levels', [])),
+                'reversal_history': self._serialize_data(getattr(self, 'reversal_history', []))
             }
             
-            # Handle datetime fields safely
-            if hasattr(self, 'last_order_time') and self.last_order_time:
-                if isinstance(self.last_order_time, datetime.datetime):
-                    update_data["last_order_time"] = self.last_order_time.isoformat()
-                else:
-                    update_data["last_order_time"] = str(self.last_order_time)
+            # Update the record in PocketBase
+            api_client.update_ACT_cycle_by_id(data['id'], data)
             
-            # Handle reversal history
-            if hasattr(self, 'reversal_history') and self.reversal_history:
-                update_data["reversal_history"] = json.dumps(serialize_datetime_objects(self.reversal_history))
+            logger.info(f"✅ Successfully updated cycle {data['id']} in database")
+            return True
             
-            # Handle closing fields
-            if hasattr(self, 'close_reason') and self.close_reason:
-                update_data["close_reason"] = str(self.close_reason)
-            
-            if hasattr(self, 'closed_by') and self.closed_by:
-                update_data["closed_by"] = str(self.closed_by)
-            
-            if hasattr(self, 'close_time') and self.close_time:
-                if isinstance(self.close_time, datetime.datetime):
-                    update_data["close_time"] = self.close_time.isoformat()
-                else:
-                    update_data["close_time"] = str(self.close_time)
-
-            # Update using the unified cycle_id
-            try:
-                api_client.update_ACT_cycle_by_id(self.cycle_id, update_data)
-                return True
-            except Exception as e:
-                logger.error(f"Error updating ACT cycle in database: {e}")
-                return False
-                
         except Exception as e:
-            logger.error(f"Error in _update_cycle_in_database: {e}")
+            logger.error(f"❌ Error updating cycle {data['id']} in database: {e}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
             return False
 
     def _create_cycle_in_database(self):
@@ -1102,7 +1361,7 @@ class AdvancedCycle(cycle):
                 "stop_loss": self._safe_getattr_float('stop_loss', 0.0),
                 "take_profit": self._safe_getattr_float('take_profit', 0.0),
                 "lot_size": self._safe_getattr_float('lot_size', 0.01),
-                "direction": str(self.current_direction) if hasattr(self, 'current_direction') else "BUY",
+                "direction": str(self.direction) if hasattr(self, 'direction') else "BUY",
                 "current_direction": str(self.current_direction) if hasattr(self, 'current_direction') else "BUY",
                 "zone_base_price": self._safe_getattr_float('zone_base_price', 0.0),
                 "initial_threshold_price": self._safe_getattr_float('initial_threshold_price', 0.0),
@@ -1113,7 +1372,6 @@ class AdvancedCycle(cycle):
                 "zone_activated": bool(getattr(self, 'zone_activated', False)),
                 "initial_threshold_breached": bool(getattr(self, 'initial_threshold_breached', False)),
                 "direction_switched": bool(getattr(self, 'direction_switched', False)),
-                "direction_switches": int(getattr(self, 'direction_switches', 0)),
                 "next_order_index": int(getattr(self, 'next_order_index', 1)),
                 "active_orders": json.dumps(getattr(self, 'active_orders', [])),
                 "completed_orders": json.dumps(getattr(self, 'completed_orders', [])),
@@ -1317,7 +1575,7 @@ class AdvancedCycle(cycle):
             self.completed_orders.clear()
             self.reversal_history.clear()
             self.reversal_count = 0
-            self.direction_switches = 0
+            self.direction_switches = []
             self.total_profit = 0.0
             self.closed_orders_pl = 0.0
             self.open_orders_pl = 0.0
@@ -1347,8 +1605,140 @@ class AdvancedCycle(cycle):
         except Exception as e:
             logger.error(f"Error debugging order status: {e}")
 
+    def _update_cycle_in_database_sync(self):
+        """Update cycle in database synchronously"""
+        try:
+            if not self.cycle_id:
+                logger.error("❌ Cannot update cycle in database: No cycle_id available")
+                return False
+                
+            if not (hasattr(self.bot, 'api_client') and self.bot.api_client):
+                logger.error("No API client available for database operations")
+                return False
+                
+            api_client = self.bot.api_client
+            
+            # Ensure profits are up to date before saving
+            self._recalculate_total_profit()
+            
+            # Prepare data for database update
+            data = {
+                'id': self.cycle_id,
+                'bot': str(self.bot.id),
+                'account': str(self.bot.account.id),
+                'symbol': self.symbol,
+                'is_closed': self.is_closed,
+                'is_favorite': getattr(self, 'is_favorite', False),
+                'status': getattr(self, 'status', 'closed' if self.is_closed else 'active'),
+                'magic_number': getattr(self.bot, 'magic_number', 0),
+                'entry_price': self._safe_float_value(getattr(self, 'entry_price', 0.0)),
+                'stop_loss': self._safe_float_value(getattr(self, 'stop_loss', 0.0)),
+                'take_profit': self._safe_float_value(getattr(self, 'take_profit', 0.0)),
+                'lot_size': self._safe_float_value(getattr(self, 'lot_size', self.bot.lot_size)),
+                'direction': self.current_direction,
+                'current_direction': self.current_direction,
+                'direction_switched': getattr(self, 'direction_switched', False),
+                'zone_base_price': self._safe_float_value(getattr(self, 'zone_base_price', 0.0)),
+                'initial_threshold_price': self._safe_float_value(getattr(self, 'initial_threshold_price', 0.0)),
+                'zone_threshold_pips': self._safe_float_value(getattr(self, 'zone_threshold_pips', self.bot.reversal_threshold_pips)),
+                'order_interval_pips': self._safe_float_value(getattr(self, 'order_interval_pips', self.bot.order_interval_pips)),
+                'batch_stop_loss_pips': self._safe_float_value(getattr(self, 'initial_order_stop_loss', self.bot.initial_order_stop_loss)),
+                'zone_range_pips': self._safe_float_value(getattr(self, 'cycle_interval', self.bot.cycle_interval)),
+                'lot_idx': int(getattr(self, 'lot_idx', 0)),
+                'lower_bound': self._safe_float_value(getattr(self, 'lower_bound', 0.0)),
+                'upper_bound': self._safe_float_value(getattr(self, 'upper_bound', 0.0)),
+                'next_order_index': int(getattr(self, 'next_order_index', 1)),
+                'current_batch_id': str(getattr(self, 'current_batch_id', '')),
+                'total_volume': self._safe_float_value(getattr(self, 'total_volume', 0.0)),
+                'total_profit': self._safe_float_value(getattr(self, 'total_profit', 0.0)),
+                'accumulated_loss': self._safe_float_value(getattr(self, 'accumulated_loss', 0.0)),
+                'batch_losses': self._safe_float_value(getattr(self, 'batch_losses', 0.0)),
+                'total_orders': len(getattr(self, 'active_orders', [])) + len(getattr(self, 'completed_orders', [])),
+                'profitable_orders': int(getattr(self, 'profitable_orders', 0)),
+                'loss_orders': int(getattr(self, 'loss_orders', 0)),
+                'duration_minutes': int(getattr(self, 'duration_minutes', 0)),
+                'reversal_threshold_pips': self._safe_float_value(getattr(self, 'reversal_threshold_pips', 300.0)),
+                'highest_buy_price': self._safe_float_value(getattr(self, 'highest_buy_price', 0.0)),
+                'lowest_sell_price': self._safe_float_value(getattr(self, 'lowest_sell_price', 999999999.0)),
+                'reversal_count': int(getattr(self, 'reversal_count', 0)),
+                'closed_orders_pl': self._safe_float_value(getattr(self, 'closed_orders_pl', 0.0)),
+                'open_orders_pl': self._safe_float_value(getattr(self, 'open_orders_pl', 0.0)),
+                'total_cycle_pl': self._safe_float_value(getattr(self, 'total_cycle_pl', 0.0)),
+                'in_recovery_mode': getattr(self, 'in_recovery_mode', False),
+                'recovery_zone_base_price': self._safe_float_value(getattr(self, 'recovery_zone_base_price', 0.0)),
+                'initial_stop_loss_price': self._safe_float_value(getattr(self, 'initial_stop_loss_price', 0.0)),
+                'recovery_activated': getattr(self, 'recovery_activated', False),
+                'recovery_direction': getattr(self, 'recovery_direction', None),
+                'placed_levels': self._make_json_serializable(getattr(self, 'placed_levels', [])),
+                'initial_order_open_price': self._safe_float_value(getattr(self, 'initial_order_open_price', 0.0)),
+                'initial_direction': getattr(self, 'initial_direction', None),
+                'initial_order_data': self._make_json_serializable(getattr(self, 'initial_order_data', {})),
+                'reversal_threshold_from_recovery': getattr(self, 'reversal_threshold_from_recovery', False),
+                'last_reversal_time': self._safe_datetime_string(getattr(self, 'last_reversal_time', None)),
+                'last_order_time': self._safe_datetime_string(getattr(self, 'last_order_time', None)),
+                'close_time': self._safe_datetime_string(getattr(self, 'close_time', None)),
+                'close_reason': getattr(self, 'close_reason', ''),
+                'closing_method': self._make_json_serializable(getattr(self, 'closing_method', {})),
+                'opened_by': self._make_json_serializable(getattr(self, 'opened_by', {})),
+                'cycle_type': getattr(self, 'cycle_type', 'ACT'),
+                'last_order_price': self._safe_float_value(getattr(self, 'last_order_price', 0.0)),
+                'orders': self._make_json_serializable(getattr(self, 'active_orders', []) + getattr(self, 'completed_orders', [])),
+                'active_orders': self._make_json_serializable(getattr(self, 'active_orders', [])),
+                'completed_orders': self._make_json_serializable(getattr(self, 'completed_orders', [])),
+                'orders_config': self._make_json_serializable(getattr(self, 'orders_config', {})),
+                'done_price_levels': self._make_json_serializable(getattr(self, 'done_price_levels', [])),
+                'reversal_history': self._make_json_serializable(getattr(self, 'reversal_history', []))
+            }
+            
+            # Apply recursive JSON serialization to handle any nested datetime objects
+            data = self._make_json_serializable(data)
+            
+            # Update the record in PocketBase
+            api_client.collection('cycles').update(self.cycle_id, data)
+            
+            logger.info(f"✅ Successfully updated cycle {self.cycle_id} in database")
+            return True
+            
+        except Exception as e:
+            logger.error(f"❌ Error updating cycle {self.cycle_id} in database: {e}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
+            return False
 
-# ==================== UTILITY FUNCTIONS ====================
+    def _safe_float_value(self, value, default=0.0):
+        """Safely convert a value to float"""
+        try:
+            if value is None:
+                return default
+            return float(value)
+        except (ValueError, TypeError):
+            return default
+            
+    def _safe_int_value(self, value, default=0):
+        """Safely convert a value to int"""
+        try:
+            if value is None:
+                return default
+            return int(value)
+        except (ValueError, TypeError):
+            return default
+            
+    def _safe_datetime_string(self, dt_value):
+        """Convert datetime to string safely"""
+        if dt_value is None:
+            return None
+        try:
+            if isinstance(dt_value, str):
+                return dt_value
+            if isinstance(dt_value, (datetime.datetime, datetime.date)):
+                return dt_value.isoformat()
+            return str(dt_value)
+        except Exception as e:
+            logger.error(f"Error converting datetime to string: {e}")
+            return None
+        
+
+    # ==================== UTILITY FUNCTIONS ====================
 
 def serialize_datetime_objects(obj):
     """Recursively serialize datetime objects and other complex types"""
@@ -1386,3 +1776,4 @@ def ensure_json_serializable(data):
             return data
         except (TypeError, ValueError):
             return str(data) 
+
