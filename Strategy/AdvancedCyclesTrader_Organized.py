@@ -3386,7 +3386,7 @@ class AdvancedCyclesTrader(Strategy):
         cycles_at_level = []
         for cycle in self.active_cycles:
             if abs(cycle.price_level - price_level) < 0.0001:  # Compare stored level directly
-                if direction is None or cycle.direction == direction:
+                if direction is None or cycle.initial_direction == direction:
                     cycles_at_level.append(cycle)
         return cycles_at_level
 
