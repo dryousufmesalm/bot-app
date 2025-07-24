@@ -112,7 +112,9 @@ class AdvancedCycle(cycle):
             self.order_interval_pips = float(cycle_data.get('order_interval_pips', 0.0))
             self.batch_stop_loss_pips = float(cycle_data.get('batch_stop_loss_pips', 0.0))
             self.zone_range_pips = float(cycle_data.get('zone_range_pips', 0.0))
-            
+            self.total_volume = float(cycle_data.get('total_volume', 0.0))
+            self.total_profit = float(cycle_data.get('total_profit', 0.0))
+           
             # Price bounds and levels
             self.lower_bound = float(cycle_data.get('lower_bound', 0.0))
             self.upper_bound = float(cycle_data.get('upper_bound', 0.0))

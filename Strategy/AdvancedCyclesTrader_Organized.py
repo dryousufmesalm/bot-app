@@ -1090,11 +1090,31 @@ class AdvancedCyclesTrader(Strategy):
                 logger.warning(f"Cycle not found: {cycle_id}")
                 return False
             
+            # Store final cycle data before closing orders
+            final_cycle_data = {
+                'total_profit': cycle.total_profit,
+                'total_volume': cycle.total_volume,
+                'direction': cycle.direction,
+                'current_direction': cycle.current_direction,
+                'active_orders': cycle.active_orders.copy() if hasattr(cycle, 'active_orders') else [],
+                'completed_orders': cycle.completed_orders.copy() if hasattr(cycle, 'completed_orders') else [],
+                'orders': cycle.orders.copy() if hasattr(cycle, 'orders') else []
+            }
+            
             # Close all orders in the cycle
             closed_orders = await self._close_all_cycle_orders(cycle)
             
             # Convert orders status to inactive
             await self._update_orders_status_to_inactive(cycle)
+            
+            # Restore final cycle data
+            cycle.total_profit = final_cycle_data['total_profit']
+            cycle.total_volume = final_cycle_data['total_volume']
+            cycle.direction = final_cycle_data['direction']
+            cycle.current_direction = final_cycle_data['current_direction']
+            cycle.orders = final_cycle_data['orders']
+            cycle.completed_orders = final_cycle_data['completed_orders'] + final_cycle_data['active_orders']
+            cycle.active_orders = []  # Clear active orders since they're now completed
             
             # Update cycle status to closed (but don't remove from active yet)
             cycle.is_closed = True
@@ -1300,8 +1320,11 @@ class AdvancedCyclesTrader(Strategy):
             # Clean up any closed cycles before starting
             self._cleanup_closed_cycles()
             
-            # Start monitoring thread
-            self.monitoring_thread = threading.Thread(target=self._monitoring_loop, daemon=True)
+            # Start monitoring thread with sync wrapper
+            async def monitoring_wrapper():
+                await self._monitoring_loop()
+                
+            self.monitoring_thread = threading.Thread(target=asyncio.run, args=(monitoring_wrapper(),), daemon=True)
             self.monitoring_thread.start()
             
             logger.info("AdvancedCyclesTrader strategy started")
@@ -1328,7 +1351,7 @@ class AdvancedCyclesTrader(Strategy):
             logger.error(f"Error stopping strategy: {e}")
             return False
 
-    def _monitoring_loop(self):
+    async def _monitoring_loop(self):
         """Main monitoring loop"""
         logger.info("Strategy monitoring loop started")
         
@@ -1345,7 +1368,7 @@ class AdvancedCyclesTrader(Strategy):
                 
                 if market_data:
                     # Process strategy logic
-                    self._process_strategy_logic(market_data)
+                    await self._process_strategy_logic(market_data)
                     
                     # Monitor order management
                     # self._monitor_order_management(market_data)
@@ -1389,7 +1412,7 @@ class AdvancedCyclesTrader(Strategy):
         except Exception as e:
             logger.error(f"Error updating active cycles: {e}")
 
-    def _process_strategy_logic(self, market_data: dict):
+    async def _process_strategy_logic(self, market_data: dict):
         """Process main strategy logic"""
         try:
             current_price = market_data.get('current_price')
@@ -1407,7 +1430,7 @@ class AdvancedCyclesTrader(Strategy):
                 if self._check_cycle_take_profit(cycle, current_price):
                     try:
                         logger.info(f"Take profit hit for cycle {cycle.cycle_id}, closing cycle")
-                        self._close_single_cycle(cycle.cycle_id,"system")
+                        await self._close_single_cycle(cycle.cycle_id,"system")
                         continue
                     except Exception as e:
                         logger.error(f"Error handling take profit for cycle {cycle.cycle_id}: {e}")
