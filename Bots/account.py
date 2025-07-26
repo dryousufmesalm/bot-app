@@ -147,7 +147,7 @@ class Account:
 
                 }
 
-            self.client.send_log(data)
+            # self.client.send_log(data)
             return True
         except (ConnectionError, TimeoutError) as e:
             logger.error(

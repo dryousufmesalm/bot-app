@@ -71,6 +71,7 @@ class AdvancedCycle(cycle):
         try:
             # Initialize defaults first
             self._initialize_defaults()
+            self.initial_order_open_datetime = cycle_data.get('initial_order_open_datetime')
             
             # Ensure direction_switches is a list
             direction_switches_data = cycle_data.get('direction_switches')
@@ -192,7 +193,7 @@ class AdvancedCycle(cycle):
         self.closing_method = {}
         self.lot_idx = 0
         self.status = 'ACTIVE'
-        
+        self.initial_order_open_datetime = None 
         # Price bounds
         self.lower_bound = 0.0
         self.upper_bound = 0.0
@@ -1394,7 +1395,7 @@ class AdvancedCycle(cycle):
                 "initial_order_stop_loss": self._safe_getattr_float('initial_order_stop_loss', 300.0),
                 "cycle_interval": self._safe_getattr_float('cycle_interval', 100.0),
                 "opened_by":self.opened_by,
-           
+                "initial_order_open_datetime": getattr(self, 'initial_order_open_datetime', None)
                
              
             }

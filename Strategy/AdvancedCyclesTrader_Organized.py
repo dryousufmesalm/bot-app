@@ -430,7 +430,7 @@ class AdvancedCyclesTrader(Strategy):
                 'initial_order_open_price': self._safe_float_value(getattr(pb_cycle, 'initial_order_open_price', 0.0)),
                 'initial_direction': getattr(pb_cycle, 'initial_direction', None),
                 'reversal_threshold_from_recovery': bool(getattr(pb_cycle, 'reversal_threshold_from_recovery', False)),
-                
+                'initial_order_open_datetime': getattr(pb_cycle, 'initial_order_open_datetime', None),
                 # Parsed JSON fields with safe defaults
                 'placed_levels': placed_levels,
                 'initial_order_data': initial_order_data,
@@ -1060,7 +1060,8 @@ class AdvancedCyclesTrader(Strategy):
             'initial_direction': direction,
             'initial_order_open_price': order_data['price'],
             'placed_levels': [],
-            'initial_order_data': order_data
+            'initial_order_data': order_data,
+            'initial_order_open_datetime': datetime.datetime.now().isoformat()
         }
 
     # ==================== CYCLE MANAGEMENT ====================
@@ -2705,7 +2706,7 @@ class AdvancedCyclesTrader(Strategy):
         """
         try:
             if not hasattr(self, 'last_cycle_price'):
-                self.last_cycle_price = current_price
+                self.last_cycle_price = self._get_last_cycle_price()
                 return
                 
             # Calculate pip difference
@@ -2738,6 +2739,7 @@ class AdvancedCyclesTrader(Strategy):
                 return  # Don't create SELL cycles above current price
             # Check if we can create more cycles
             if len(self.active_cycles) >= self.max_active_cycles:
+                self.last_cycle_price = price
                 logger.warning(f"Cannot create new cycle: max cycles ({self.max_active_cycles}) reached")
                 return
         except Exception as e:
@@ -2790,6 +2792,7 @@ class AdvancedCyclesTrader(Strategy):
                 'sl': 0.0,
                 'tp': 0.0,
                 'price_level': price  # Store the level in order data
+                
             }
                 
             logger.info(f"Successfully placed {direction} order for interval cycle")
@@ -2814,6 +2817,28 @@ class AdvancedCyclesTrader(Strategy):
             logger.error(f"Exception during {direction} order placement for interval cycle: {order_error}")
             return
 
+    # get the last cycle price from the database and set it as the last cycle price
+    def _get_last_cycle_price(self):
+        try:
+            last_cycle_price = 0
+            last_cycle_price_timestamp = 0
+            #go through the cycles and get the last cycle price based on the initial order open datetime
+            for cycle in self.active_cycles:
+                if cycle.initial_order_open_datetime:
+                    # Convert datetime string to timestamp for comparison
+                    cycle_timestamp = datetime.datetime.fromisoformat(cycle.initial_order_open_datetime).timestamp()
+                    if cycle_timestamp > last_cycle_price_timestamp:
+                        last_cycle_price_timestamp = cycle_timestamp
+                        last_cycle_price = cycle.price_level  # Use price level instead of datetime
+            if last_cycle_price_timestamp == 0:
+                return self.meta_trader.get_ask(self.symbol)
+            else:
+                return last_cycle_price
+            
+          
+            
+        except Exception as e:
+            logger.error(f"Error getting last cycle price: {e}")
     def _create_manual_cycle_sync(self, order_data: dict, direction: str, 
                                 username: str, sent_by_admin: bool, user_id: str) -> bool:
         """
@@ -3400,7 +3425,7 @@ class AdvancedCyclesTrader(Strategy):
         """Calculate the price level based on cycle_interval_pips"""
         pip_value = self._get_pip_value()
         if self.last_cycle_price == 0:
-            self.last_cycle_price = self.meta_trader.get_ask(self.symbol)
+            self.last_cycle_price = self._get_last_cycle_price()
         next_up_level= self.last_cycle_price + (self.cycle_interval*self._get_pip_value())
         next_down_level= self.last_cycle_price - (self.cycle_interval*self._get_pip_value())
         return next_up_level, next_down_level
@@ -3419,7 +3444,7 @@ class AdvancedCyclesTrader(Strategy):
             if not current_price:
                 return
             if not hasattr(self, 'last_cycle_price'):
-                self.last_cycle_price = current_price
+                self.last_cycle_price = self._get_last_cycle_price()
                 return
             # Calculate the current price level
             next_up_level, next_down_level = self._calculate_price_level()
