@@ -103,7 +103,8 @@ class AdvancedCyclesTrader(Strategy):
         self.cycle_interval = float(config.get("cycle_interval_pips", 100.0))
         self.initial_order_stop_loss = float(config.get("initial_order_stop_loss_pips", 300.0))
         self.zone_range_pips = int(config.get("zone_range_pips", 50))
-        
+        self.auto_place_cycles=bool(config.get("auto_place_cycles", True))
+        self.one_direction_per_candle=bool(config.get("one_direction_per_candle", True))
     def _initialize_advanced_components(self):
         """Initialize advanced trading components"""
         # Multi-cycle management
@@ -2738,7 +2739,7 @@ class AdvancedCyclesTrader(Strategy):
             if direction == "SELL" and price < self.meta_trader.get_bid(self.symbol):
                 return  # Don't create SELL cycles above current price
             # Check if we can create more cycles
-            if len(self.active_cycles) >= self.max_active_cycles:
+            if len(self.active_cycles) >= self.max_active_cycles or self.auto_place_cycles  is False:
                 self.last_cycle_price = price
                 logger.warning(f"Cannot create new cycle: max cycles ({self.max_active_cycles}) reached")
                 return
@@ -3434,8 +3435,12 @@ class AdvancedCyclesTrader(Strategy):
         cycles_at_level = []
         for cycle in self.active_cycles:
             if abs(cycle.price_level - price_level) < 0.0001:  # Compare stored level directly
-                if direction is None or cycle.initial_direction == direction:
+                
+                if cycle.initial_direction == direction and self.one_direction_per_candle is True and direction is not None:
                     cycles_at_level.append(cycle)
+                elif self.one_direction_per_candle is False  and direction is not None:
+                    cycles_at_level.append(cycle)
+               
         return cycles_at_level
 
     def _check_cycle_intervals(self, current_price):
