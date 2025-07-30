@@ -568,6 +568,14 @@ class AdvancedCycle(cycle):
             
             # Calculate profit from active orders
             for order in self.active_orders:
+                # Handle case where order might be an integer (ticket number) instead of dict
+                if isinstance(order, int):
+                    logger.warning(f"Found integer ticket {order} in active_orders, skipping profit calculation")
+                    continue
+                elif not isinstance(order, dict):
+                    logger.warning(f"Found non-dict order {type(order)} in active_orders, skipping profit calculation")
+                    continue
+                
                 profit = float(order.get('profit', 0.0))
                 swap = float(order.get('swap', 0.0))
                 commission = float(order.get('commission', 0.0))
@@ -580,6 +588,14 @@ class AdvancedCycle(cycle):
             
             # Calculate profit from completed orders
             for order in self.completed_orders:
+                # Handle case where order might be an integer (ticket number) instead of dict
+                if isinstance(order, int):
+                    logger.warning(f"Found integer ticket {order} in completed_orders, skipping profit calculation")
+                    continue
+                elif not isinstance(order, dict):
+                    logger.warning(f"Found non-dict order {type(order)} in completed_orders, skipping profit calculation")
+                    continue
+                
                 profit = float(order.get('profit', 0.0))
                 swap = float(order.get('swap', 0.0))
                 commission = float(order.get('commission', 0.0))
@@ -623,6 +639,9 @@ class AdvancedCycle(cycle):
     def update_orders_with_live_data(self):
         """Update orders with live data from MT5 and recalculate profits"""
         try:
+            # Clean up order lists first to handle any integer tickets
+            self.cleanup_order_lists()
+            
             # Get current positions from MT5
             positions = self._get_mt5_positions()
             
@@ -632,15 +651,21 @@ class AdvancedCycle(cycle):
             # Create lookup dictionary for faster access
             positions_dict = self._create_positions_lookup(positions)
             
+             # Check for and recover mistakenly completed orders
+            recovered_count = self._recover_mistakenly_completed_orders(positions_dict)
+            
             # Update orders with live data
             updated_count = self._update_orders_from_positions(positions_dict)
             
-            # Recalculate total profit after updating orders
+            # Recalculate total profit after updating orders and recovering orders
             self._recalculate_total_profit()
             
-            # Update database with latest profit information if orders were updated
-            if updated_count > 0:
+            # Update database with latest profit information if orders were updated or recovered
+            if updated_count > 0 or recovered_count > 0:
                 self._update_cycle_in_database()
+            
+            # Validate order consistency after all updates
+            self.validate_order_consistency()
             
         except Exception as e:
             logger.error(f"Error updating orders with live data: {e}")
@@ -671,6 +696,14 @@ class AdvancedCycle(cycle):
         
         for order in self.active_orders:
             try:
+                # Handle case where order might be an integer (ticket number) instead of dict
+                if isinstance(order, int):
+                    logger.warning(f"Found integer ticket {order} in active_orders, skipping update")
+                    continue
+                elif not isinstance(order, dict):
+                    logger.warning(f"Found non-dict order {type(order)} in active_orders, skipping update")
+                    continue
+                
                 # Convert ticket to integer for dictionary lookup
                 ticket = int(order.get('ticket', '0'))
                 if ticket in positions_dict:
@@ -694,6 +727,93 @@ class AdvancedCycle(cycle):
         
         logger.info(f"Updated {updated_count} orders out of {len(self.active_orders)} active orders")
         return updated_count
+
+    def _recover_mistakenly_completed_orders(self, positions_dict) -> int:
+        """Check completed orders and move back to active if they still exist in MT5"""
+        try:
+            recovered_count = 0
+            
+            # Check each completed order to see if it still exists in MT5 positions
+            for order in self.completed_orders[:]:  # Use slice copy to avoid modification during iteration
+                try:
+                    ticket = int(order.get('ticket', '0'))
+                    
+                    # Check if this order exists in MT5 positions
+                    if ticket in positions_dict:
+                        logger.info(f"Order {ticket} found in MT5 positions but was in completed orders. Moving back to active orders")
+                        
+                        # Remove from completed orders
+                        self.completed_orders.remove(order)
+                        
+                        # Ensure order format consistency with active orders
+                        self._ensure_order_format_consistency(order)
+                        
+                        # Reset order status to active
+                        order['status'] = 'active'
+                        order['is_closed'] = False
+                        
+                        # Remove close_time if it exists
+                        if 'close_time' in order:
+                            del order['close_time']
+                        
+                        # Add back to active orders
+                        self.active_orders.append(order)
+                        
+                        recovered_count += 1
+                        logger.info(f"Successfully recovered order {ticket} to active orders")
+                        
+                except ValueError as ve:
+                    logger.error(f"Invalid ticket format for completed order: {order.get('ticket', 'unknown')}")
+                except Exception as e:
+                    logger.error(f"Error processing completed order {order.get('ticket', 'unknown')}: {e}")
+            
+            if recovered_count > 0:
+                logger.info(f"Recovered {recovered_count} orders from completed to active orders")
+                logger.info(f"Active orders: {len(self.active_orders)}, Completed orders: {len(self.completed_orders)}")
+            
+            return recovered_count
+            
+        except Exception as e:
+            logger.error(f"Error recovering mistakenly completed orders: {e}")
+            return 0
+
+    def _ensure_order_format_consistency(self, order):
+        """Ensure order format matches the expected structure for active orders"""
+        try:
+            # Ensure all required fields are present
+            required_fields = ['ticket', 'symbol', 'type', 'volume', 'price', 'status']
+            for field in required_fields:
+                if field not in order:
+                    logger.warning(f"Missing required field '{field}' in order {order.get('ticket', 'unknown')}")
+                    # Set default values for missing fields
+                    if field == 'ticket':
+                        order[field] = '0'
+                    elif field == 'symbol':
+                        order[field] = self.symbol
+                    elif field == 'type':
+                        order[field] = 'buy'  # Default to buy
+                    elif field == 'volume':
+                        order[field] = 0.01
+                    elif field == 'price':
+                        order[field] = 0.0
+                    elif field == 'status':
+                        order[field] = 'active'
+            
+            # Ensure numeric fields are properly typed
+            numeric_fields = ['volume', 'price', 'profit', 'swap', 'commission']
+            for field in numeric_fields:
+                if field in order:
+                    try:
+                        order[field] = float(order[field])
+                    except (ValueError, TypeError):
+                        order[field] = 0.0
+            
+            # Ensure ticket is string format
+            if 'ticket' in order:
+                order['ticket'] = str(order['ticket'])
+                
+        except Exception as e:
+            logger.error(f"Error ensuring order format consistency: {e}")
 
     # ==================== CYCLE STATUS MANAGEMENT ====================
 
@@ -745,20 +865,43 @@ class AdvancedCycle(cycle):
             logger.error(f"Error updating order statuses: {e}")
 
     def _is_order_closed(self, order) -> bool:
-        """Check if an order is closed"""
+        """Check if an order is closed with enhanced validation"""
         try:
+            # Handle case where order might be an integer (ticket number) instead of dict
+            if isinstance(order, int):
+                logger.warning(f"Found integer ticket {order} in order check, treating as closed")
+                return True
+            elif not isinstance(order, dict):
+                logger.warning(f"Found non-dict order {type(order)} in order check, treating as closed")
+                return True
+            
             ticket = order.get('ticket')
             if not ticket:
                 return False
             
-            # Check if position still exists in MT5
+            # Check if position still exists in MT5 with retry logic
             positions = self._get_mt5_positions()
             position_tickets = [str(getattr(pos, 'ticket', '')) for pos in positions]
             
             # If the order is not in MT5 positions and not already marked as closed
             if str(ticket) not in position_tickets and not order.get('is_closed', False):
-                logger.info(f"Order {ticket} not found in MT5 positions and not marked as closed")
-                return True
+                # Double-check with a second position check to avoid false positives
+                logger.info(f"Order {ticket} not found in MT5 positions, performing double-check")
+                
+                # Wait a moment and check again to avoid race conditions
+                import time
+                time.sleep(0.1)  # Small delay to allow for position updates
+                
+                # Second position check
+                positions_retry = self._get_mt5_positions()
+                position_tickets_retry = [str(getattr(pos, 'ticket', '')) for pos in positions_retry]
+                
+                if str(ticket) not in position_tickets_retry:
+                    logger.info(f"Order {ticket} confirmed not found in MT5 positions after double-check")
+                    return True
+                else:
+                    logger.info(f"Order {ticket} found in MT5 positions on retry - keeping as active")
+                    return False
             
             return False
             
@@ -1607,6 +1750,126 @@ class AdvancedCycle(cycle):
             
         except Exception as e:
             logger.error(f"Error debugging order status: {e}")
+
+    def validate_order_consistency(self):
+        """Validate order consistency and report any issues"""
+        try:
+            issues = []
+            
+            # Check for duplicate tickets in active orders
+            active_tickets = [order.get('ticket') for order in self.active_orders]
+            duplicate_active = [ticket for ticket in set(active_tickets) if active_tickets.count(ticket) > 1]
+            if duplicate_active:
+                issues.append(f"Duplicate tickets in active orders: {duplicate_active}")
+            
+            # Check for duplicate tickets in completed orders
+            completed_tickets = [order.get('ticket') for order in self.completed_orders]
+            duplicate_completed = [ticket for ticket in set(completed_tickets) if completed_tickets.count(ticket) > 1]
+            if duplicate_completed:
+                issues.append(f"Duplicate tickets in completed orders: {duplicate_completed}")
+            
+            # Check for orders that exist in both active and completed
+            active_set = set(active_tickets)
+            completed_set = set(completed_tickets)
+            common_tickets = active_set.intersection(completed_set)
+            if common_tickets:
+                issues.append(f"Orders exist in both active and completed: {common_tickets}")
+            
+            # Check for orders with invalid status
+            for order in self.active_orders:
+                if order.get('status') != 'active':
+                    issues.append(f"Active order {order.get('ticket')} has invalid status: {order.get('status')}")
+            
+            for order in self.completed_orders:
+                if order.get('status') != 'closed':
+                    issues.append(f"Completed order {order.get('ticket')} has invalid status: {order.get('status')}")
+            
+            if issues:
+                logger.warning(f"Order consistency issues found in cycle {self.cycle_id}:")
+                for issue in issues:
+                    logger.warning(f"  - {issue}")
+                return False
+            else:
+                logger.info(f"Order consistency validation passed for cycle {self.cycle_id}")
+                return True
+                
+        except Exception as e:
+            logger.error(f"Error validating order consistency: {e}")
+            return False
+
+    def force_recovery_of_completed_orders(self):
+        """Force recovery of all completed orders that might be mistakenly moved"""
+        try:
+            logger.info(f"Starting forced recovery of completed orders for cycle {self.cycle_id}")
+            
+            # Get current MT5 positions
+            positions = self._get_mt5_positions()
+            if not positions:
+                logger.warning("No MT5 positions available for recovery check")
+                return 0
+            
+            # Create positions lookup
+            positions_dict = self._create_positions_lookup(positions)
+            
+            # Attempt to recover all completed orders
+            recovered_count = self._recover_mistakenly_completed_orders(positions_dict)
+            
+            if recovered_count > 0:
+                logger.info(f"Force recovery completed: {recovered_count} orders recovered")
+                # Recalculate profits after recovery
+                self._recalculate_total_profit()
+                # Update database
+                self._update_cycle_in_database()
+            else:
+                logger.info("No orders recovered during force recovery")
+            
+            return recovered_count
+            
+        except Exception as e:
+            logger.error(f"Error during force recovery of completed orders: {e}")
+            return 0
+
+    def cleanup_order_lists(self):
+        """Clean up order lists by converting integer tickets to proper order dictionaries"""
+        try:
+            logger.info(f"Cleaning up order lists for cycle {self.cycle_id}")
+            
+            # Clean up active orders
+            cleaned_active = []
+            for item in self.active_orders:
+                if isinstance(item, int):
+                    # Convert integer ticket to order dictionary
+                    order_dict = self._create_order_data_from_ticket(str(item))
+                    cleaned_active.append(order_dict)
+                    logger.info(f"Converted integer ticket {item} to order dictionary")
+                elif isinstance(item, dict):
+                    cleaned_active.append(item)
+                else:
+                    logger.warning(f"Removing invalid order item of type {type(item)}: {item}")
+            
+            # Clean up completed orders
+            cleaned_completed = []
+            for item in self.completed_orders:
+                if isinstance(item, int):
+                    # Convert integer ticket to order dictionary
+                    order_dict = self._create_order_data_from_ticket(str(item))
+                    order_dict['status'] = 'closed'
+                    order_dict['is_closed'] = True
+                    cleaned_completed.append(order_dict)
+                    logger.info(f"Converted integer ticket {item} to completed order dictionary")
+                elif isinstance(item, dict):
+                    cleaned_completed.append(item)
+                else:
+                    logger.warning(f"Removing invalid order item of type {type(item)}: {item}")
+            
+            # Update the lists
+            self.active_orders = cleaned_active
+            self.completed_orders = cleaned_completed
+            
+            logger.info(f"Order lists cleaned up. Active orders: {len(self.active_orders)}, Completed orders: {len(self.completed_orders)}")
+            
+        except Exception as e:
+            logger.error(f"Error cleaning up order lists: {e}")
 
     def _update_cycle_in_database_sync(self):
         """Update cycle in database synchronously"""

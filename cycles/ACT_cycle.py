@@ -104,9 +104,41 @@ class AdvancedCycle(cycle):
         self.order_interval_pips = cycle_data.get("order_interval_pips", 50.0)
         self.batch_stop_loss_pips = cycle_data.get("batch_stop_loss_pips", 300.0)
         
-        # Order management
-        self.active_orders = cycle_data.get("active_orders", [])
-        self.completed_orders = cycle_data.get("completed_orders", [])
+        # Order management - CRITICAL FIX: Handle JSON strings from PocketBase
+        active_orders_raw = cycle_data.get("active_orders", [])
+        completed_orders_raw = cycle_data.get("completed_orders", [])
+        
+        # Parse active orders
+        if isinstance(active_orders_raw, str):
+            try:
+                import json
+                self.active_orders = json.loads(active_orders_raw) if active_orders_raw else []
+            except Exception as e:
+                logger.warning(f"Could not parse active_orders for cycle {cycle_data.get('id', 'unknown')}: {e}")
+                self.active_orders = []
+        elif isinstance(active_orders_raw, list):
+            self.active_orders = active_orders_raw
+        else:
+            logger.warning(f"Unexpected active_orders type: {type(active_orders_raw)}")
+            self.active_orders = []
+        
+        # Parse completed orders
+        if isinstance(completed_orders_raw, str):
+            try:
+                import json
+                self.completed_orders = json.loads(completed_orders_raw) if completed_orders_raw else []
+            except Exception as e:
+                logger.warning(f"Could not parse completed_orders for cycle {cycle_data.get('id', 'unknown')}: {e}")
+                self.completed_orders = []
+        elif isinstance(completed_orders_raw, list):
+            self.completed_orders = completed_orders_raw
+        else:
+            logger.warning(f"Unexpected completed_orders type: {type(completed_orders_raw)}")
+            self.completed_orders = []
+        
+        # ENHANCEMENT: Initialize persistent orders array with all orders
+        self.orders = self.active_orders + self.completed_orders
+        logger.info(f"✅ Initialized orders array for cycle {self.cycle_id}: {len(self.orders)} total orders ({len(self.active_orders)} active, {len(self.completed_orders)} completed)")
         
         # CRITICAL FIX: Initialize batch_id properly
         self.current_batch_id = cycle_data.get("current_batch_id", None)
@@ -240,6 +272,25 @@ class AdvancedCycle(cycle):
             
         except Exception as e:
             logger.error(f"Error updating orders with live data: {e}")
+
+    def _update_orders_array(self):
+        """Update the orders array to contain all orders (active + completed)"""
+        try:
+            # Combine active and completed orders
+            self.orders = self.active_orders + self.completed_orders
+            logger.debug(f"✅ Updated orders array for cycle {self.cycle_id}: {len(self.orders)} total orders ({len(self.active_orders)} active, {len(self.completed_orders)} completed)")
+        except Exception as e:
+            logger.error(f"Error updating orders array: {e}")
+
+    def get_orders(self):
+        """Get the current orders array containing all orders (active + completed)"""
+        try:
+            # Ensure orders array is up to date
+            self._update_orders_array()
+            return self.orders
+        except Exception as e:
+            logger.error(f"Error getting orders array: {e}")
+            return []
 
     def add_order(self, order_input):
         """Add an order to this cycle and update PocketBase
@@ -396,6 +447,9 @@ class AdvancedCycle(cycle):
             self.last_order_price = price_open
             logger.debug(f"Updated last_order_price to {self.last_order_price} for cycle {self.cycle_id}")
             
+            # ENHANCEMENT: Update orders array to include new order
+            self._update_orders_array()
+            
             logger.info(f"✅ Order {order_ticket} added to cycle {self.cycle_id} - Total active orders: {len(self.active_orders)}")
             logger.info(f"   Order details: {order_info['kind']} {order_info['type']} {order_info['symbol']} {order_info['volume']} @ {order_info['open_price']}")
             
@@ -407,10 +461,11 @@ class AdvancedCycle(cycle):
                     # Prepare update data with the new order
                     update_data = {
                         "active_orders": json.dumps(serialize_datetime_objects(self.active_orders)),
-                        "orders": json.dumps(serialize_datetime_objects(self.active_orders + self.completed_orders)),
-                        "total_orders": len(self.active_orders) + len(self.completed_orders),
-                        "total_volume": sum(order.get('volume', 0.0) for order in self.active_orders + self.completed_orders),
-                        "total_profit": sum(order.get('profit', 0.0) for order in self.active_orders + self.completed_orders),
+                        "completed_orders": json.dumps(serialize_datetime_objects(self.completed_orders)),
+                        "orders": json.dumps(serialize_datetime_objects(self.orders)),
+                        "total_orders": len(self.orders),
+                        "total_volume": float(sum(float(order.get('volume', 0.0)) for order in self.orders)),
+                        "total_profit": float(sum(float(order.get('profit', 0.0)) for order in self.orders)),
                         "next_order_index": int(self.next_order_index),
                         "last_order_price": float(self.last_order_price) if self.last_order_price else 0.0,
                         "last_order_time": self.last_order_time.isoformat() if self.last_order_time else None,
@@ -488,6 +543,9 @@ class AdvancedCycle(cycle):
                                 
                                 self.completed_orders.append(order)
                                 self.active_orders.remove(order)
+                                
+                                # ENHANCEMENT: Update orders array after status change
+                                self._update_orders_array()
                                 
                                 # Update accumulated loss if order was a loss
                                 if order["profit"] < 0:
@@ -642,6 +700,9 @@ class AdvancedCycle(cycle):
             
             # Clear active orders list
             self.active_orders.clear()
+            
+            # ENHANCEMENT: Update orders array after cycle closure
+            self._update_orders_array()
             
             # Log closing summary
             total_orders = closed_count + failed_count
@@ -1217,10 +1278,10 @@ class AdvancedCycle(cycle):
             update_data = {
                 "active_orders": json.dumps(serialize_datetime_objects(self.active_orders)),
                 "completed_orders": json.dumps(serialize_datetime_objects(self.completed_orders)),
-                "orders": json.dumps(serialize_datetime_objects(self.active_orders + self.completed_orders)),
-                "total_orders": len(self.active_orders) + len(self.completed_orders),
-                "total_volume": float(sum(float(order.get('volume', 0.0)) for order in self.active_orders + self.completed_orders)),
-                "total_profit": float(sum(float(order.get('profit', 0.0)) for order in self.active_orders + self.completed_orders)),
+                "orders": json.dumps(serialize_datetime_objects(self.orders)),
+                "total_orders": len(self.orders),
+                "total_volume": float(sum(float(order.get('volume', 0.0)) for order in self.orders)),
+                "total_profit": float(sum(float(order.get('profit', 0.0)) for order in self.orders)),
                 "status": "active" if self.is_active else "inactive",
                 "is_closed": self.is_closed,
                 "is_active": self.is_active,

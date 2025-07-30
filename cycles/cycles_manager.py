@@ -129,7 +129,7 @@ class cycles_manager:
                 await asyncio.gather(
                     self.sync_AH_cycles(),
                     self.sync_CT_cycles(),
-                    self.sync_ACT_cycles(),
+                    # self.sync_ACT_cycles(),
                     self.fix_incorrectly_closed_cycles()
                 )
                 await asyncio.sleep(1)

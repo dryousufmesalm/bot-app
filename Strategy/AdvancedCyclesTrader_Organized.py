@@ -236,11 +236,58 @@ class AdvancedCyclesTrader(Strategy):
                             
                             # Find initial order
                             initial_order = None
-                            all_orders = cycle.active_orders + cycle.completed_orders
+                            
+                            # Safely combine and parse orders
+                            all_orders = []
+                            
+                            # Process active orders
+                            if hasattr(cycle, 'active_orders'):
+                                if isinstance(cycle.active_orders, str):
+                                    try:
+                                        import json
+                                        active_orders = json.loads(cycle.active_orders) if cycle.active_orders else []
+                                        all_orders.extend(active_orders)
+                                    except Exception as e:
+                                        logger.warning(f"Could not parse active_orders for cycle {cycle.cycle_id}: {e}")
+                                elif isinstance(cycle.active_orders, list):
+                                    all_orders.extend(cycle.active_orders)
+                                else:
+                                    logger.warning(f"Unexpected active_orders type for cycle {cycle.cycle_id}: {type(cycle.active_orders)}")
+                            
+                            # Process completed orders
+                            if hasattr(cycle, 'completed_orders'):
+                                if isinstance(cycle.completed_orders, str):
+                                    try:
+                                        import json
+                                        completed_orders = json.loads(cycle.completed_orders) if cycle.completed_orders else []
+                                        all_orders.extend(completed_orders)
+                                    except Exception as e:
+                                        logger.warning(f"Could not parse completed_orders for cycle {cycle.cycle_id}: {e}")
+                                elif isinstance(cycle.completed_orders, list):
+                                    all_orders.extend(cycle.completed_orders)
+                                else:
+                                    logger.warning(f"Unexpected completed_orders type for cycle {cycle.cycle_id}: {type(cycle.completed_orders)}")
+                            
+                            # Find initial order with type safety
                             for order in all_orders:
-                                if order.get('kind', 'initial') == 'initial':
-                                    initial_order = order
-                                    break
+                                try:
+                                    if isinstance(order, dict) and order.get('kind', 'initial') == 'initial':
+                                        initial_order = order
+                                        break
+                                    elif isinstance(order, str):
+                                        # Try to parse string order
+                                        try:
+                                            import json
+                                            parsed_order = json.loads(order)
+                                            if isinstance(parsed_order, dict) and parsed_order.get('kind', 'initial') == 'initial':
+                                                initial_order = parsed_order
+                                                break
+                                        except Exception as e:
+                                            logger.warning(f"Could not parse order string: {e}")
+                                            continue
+                                except Exception as e:
+                                    logger.warning(f"Error processing order: {e}")
+                                    continue
                             
                             if initial_order:
                                 # Restore recovery data
@@ -531,25 +578,36 @@ class AdvancedCyclesTrader(Strategy):
         except Exception as e:
             logger.error(f"Error updating orders status to inactive: {e}")
 
-    async def _update_cycle_in_database(self, cycle):
-        """Update cycle in database with proper JSON serialization"""
+    async def _update_cycle_in_database(self, cycle, use_snapshot: bool = False, snapshot: dict = None):
+        """Update cycle in database with proper JSON serialization and optional snapshot support"""
         try:
             # Prepare cycle data for database update
-            cycle_data = self._prepare_cycle_data_for_database(cycle)
+            cycle_data = self._prepare_cycle_data_for_database(cycle, use_snapshot, snapshot)
             
             if not cycle_data:
                 logger.error(f"Failed to prepare cycle data for database update - cycle {cycle.cycle_id}")
                 return
             
+            # Validate cycle data before update
+            if not self._validate_cycle_data_before_update(cycle_data):
+                logger.error(f"❌ Cycle data validation failed for cycle {cycle.cycle_id}")
+                return
+            
             # Log the data being sent for debugging
             logger.debug(f"Updating cycle {cycle.cycle_id} with data keys: {list(cycle_data.keys())}")
+            
+            # Log order counts for debugging
+            active_orders = cycle_data.get('active_orders', '[]')
+            completed_orders = cycle_data.get('completed_orders', '[]')
+            logger.info(f"📊 Cycle {cycle.cycle_id} - Active orders: {len(active_orders) if isinstance(active_orders, list) else 'N/A'}, Completed orders: {len(completed_orders) if isinstance(completed_orders, list) else 'N/A'}")
             
             # Update in PocketBase
             if hasattr(self.client, 'update_ACT_cycle_by_id'):
                 try:
                     result = self.client.update_ACT_cycle_by_id(cycle.cycle_id, cycle_data)
                     if result:
-                        logger.debug(f"✅ Cycle {cycle.cycle_id} updated in database successfully")
+                        logger.info(f"✅ Cycle {cycle.cycle_id} updated in database successfully")
+                        logger.debug(f"📋 Updated with {len(active_orders) if isinstance(active_orders, list) else 0} active and {len(completed_orders) if isinstance(completed_orders, list) else 0} completed orders")
                     else:
                         logger.error(f"❌ Failed to update cycle {cycle.cycle_id} in database - client returned falsy result")
                 except Exception as client_error:
@@ -571,66 +629,90 @@ class AdvancedCyclesTrader(Strategy):
                 logger.error(f"Is Closed: {cycle.is_closed}")
             raise
 
-    def _prepare_cycle_data_for_database(self, cycle):
-        """Prepare cycle data for database update"""
+    def _prepare_cycle_data_for_database(self, cycle, use_snapshot: bool = False, snapshot: dict = None):
+        """Prepare cycle data for database update with optional snapshot support"""
         try:
+            # Use snapshot if provided, otherwise use cycle object
+            if use_snapshot and snapshot:
+                logger.info(f"📸 Using snapshot data for cycle {cycle.cycle_id}")
+                cycle_data = snapshot
+                is_snapshot = True
+            else:
+                logger.info(f"📋 Using live cycle data for cycle {cycle.cycle_id}")
+                cycle_data = cycle
+                is_snapshot = False
+            
+            # Helper function to safely get values from either snapshot dict or cycle object
+            def get_value(field_name, default=None):
+                if is_snapshot:
+                    return cycle_data.get(field_name, default)
+                else:
+                    return getattr(cycle_data, field_name, default)
+            
             data = {
                 'id': cycle.cycle_id,
+                'cycle_id': cycle.cycle_id,  # Ensure cycle_id is explicitly set
                 'bot': str(self.bot.id),
                 'account': str(self.bot.account.id),
-                'symbol': cycle.symbol,
-                'is_closed': cycle.is_closed,
-                'is_favorite': cycle.is_favorite,
-                'opened_by': self._serialize_data(cycle.opened_by),
-                'closing_method': self._serialize_data(cycle.closing_method),
-                'lot_idx': self._safe_int_value(cycle.lot_idx),
-                'status': cycle.status,
-                'lower_bound': self._safe_float_value(cycle.lower_bound),
-                'upper_bound': self._safe_float_value(cycle.upper_bound),
-                'total_volume': self._safe_float_value(cycle.total_volume),
-                'total_profit': self._safe_float_value(cycle.total_profit),
-                'orders': self._serialize_data(cycle.orders),
-                'orders_config': self._serialize_data(cycle.orders_config),
-                'cycle_type': cycle.cycle_type,
-                'magic_number': self._safe_int_value(cycle.magic_number),
-                'entry_price': self._safe_float_value(cycle.entry_price),
-                'stop_loss': self._safe_float_value(cycle.stop_loss),
-                'take_profit': self._safe_float_value(cycle.take_profit),
-                'lot_size': self._safe_float_value(cycle.lot_size),
-                'direction': cycle.direction,
-                'current_direction': cycle.current_direction,
-                'zone_base_price': self._safe_float_value(cycle.zone_base_price),
-                'initial_threshold_price': self._safe_float_value(cycle.initial_threshold_price),
-                'zone_threshold_pips': self._safe_float_value(cycle.zone_threshold_pips),
-                'order_interval_pips': self._safe_float_value(cycle.order_interval_pips),
-                'batch_stop_loss_pips': self._safe_float_value(cycle.batch_stop_loss_pips),
-                'zone_range_pips': self._safe_float_value(cycle.zone_range_pips),
-                'direction_switched': cycle.direction_switched,
-                'direction_switches': self._serialize_data(cycle.direction_switches),
-                'next_order_index': self._safe_int_value(cycle.next_order_index),
-                'done_price_levels': self._serialize_data(cycle.done_price_levels),
-                'active_orders': self._serialize_data(cycle.active_orders),
-                'completed_orders': self._serialize_data(cycle.completed_orders),
-                'current_batch_id': cycle.current_batch_id,
-                'last_order_price': self._safe_float_value(cycle.last_order_price),
-                'last_order_time': self._safe_datetime_string(cycle.last_order_time),
-                'accumulated_loss': self._safe_float_value(cycle.accumulated_loss),
-                'batch_losses': self._safe_float_value(cycle.batch_losses),
-                'close_reason': cycle.close_reason,
-                'close_time': self._safe_datetime_string(cycle.close_time),
-                'total_orders': self._safe_int_value(cycle.total_orders),
-                'profitable_orders': self._safe_int_value(cycle.profitable_orders),
-                'loss_orders': self._safe_int_value(cycle.loss_orders),
-                'duration_minutes': self._safe_int_value(cycle.duration_minutes),
-                'reversal_threshold_pips': self._safe_float_value(cycle.reversal_threshold_pips),
-                'highest_buy_price': self._safe_float_value(cycle.highest_buy_price),
-                'lowest_sell_price': self._safe_float_value(cycle.lowest_sell_price),
-                'reversal_count': self._safe_int_value(cycle.reversal_count),
-                'closed_orders_pl': self._safe_float_value(cycle.closed_orders_pl),
-                'open_orders_pl': self._safe_float_value(cycle.open_orders_pl),
-                'total_cycle_pl': self._safe_float_value(cycle.total_cycle_pl),
-                'last_reversal_time': self._safe_datetime_string(cycle.last_reversal_time),
-                'reversal_history': self._serialize_data(cycle.reversal_history),
+                'symbol': get_value('symbol', cycle.symbol),
+                'status': get_value('status', cycle.status),
+                'is_closed': get_value('is_closed', cycle.is_closed),
+                'is_active': get_value('is_active', cycle.is_active),
+                'close_reason': get_value('close_reason', cycle.close_reason),
+                'closed_by': get_value('closed_by', cycle.closed_by),
+                'close_time': get_value('close_time', cycle.close_time),
+                'orders': get_value('orders', cycle.orders),
+
+                'opened_by': self._serialize_data(get_value('opened_by', cycle.opened_by)),
+                'closing_method': self._serialize_data(get_value('closing_method', cycle.closing_method)),
+                'lot_idx': self._safe_int_value(get_value('lot_idx', cycle.lot_idx)),
+                'status': get_value('status', cycle.status),
+                'lower_bound': self._safe_float_value(get_value('lower_bound', cycle.lower_bound)),
+                'upper_bound': self._safe_float_value(get_value('upper_bound', cycle.upper_bound)),
+                'total_volume': self._safe_float_value(get_value('total_volume', cycle.total_volume)) or 0.0,  # Ensure default
+                'total_profit': self._safe_float_value(get_value('total_profit', cycle.total_profit)) or 0.0,  # Ensure default
+                'orders': self._serialize_data(get_value('orders', cycle.orders)),
+                'orders_config': self._serialize_data(get_value('orders_config', cycle.orders_config)),
+                'cycle_type': get_value('cycle_type', cycle.cycle_type),
+                'magic_number': self._safe_int_value(get_value('magic_number', cycle.magic_number)),
+                'entry_price': self._safe_float_value(get_value('entry_price', cycle.entry_price)),
+                'stop_loss': self._safe_float_value(get_value('stop_loss', cycle.stop_loss)),
+                'take_profit': self._safe_float_value(get_value('take_profit', cycle.take_profit)),
+                'lot_size': self._safe_float_value(get_value('lot_size', cycle.lot_size)),
+                'direction': get_value('direction', cycle.direction),
+                'current_direction': get_value('current_direction', cycle.current_direction),
+                'zone_base_price': self._safe_float_value(get_value('zone_base_price', cycle.zone_base_price)),
+                'initial_threshold_price': self._safe_float_value(get_value('initial_threshold_price', cycle.initial_threshold_price)),
+                'zone_threshold_pips': self._safe_float_value(get_value('zone_threshold_pips', cycle.zone_threshold_pips)),
+                'order_interval_pips': self._safe_float_value(get_value('order_interval_pips', cycle.order_interval_pips)),
+                'batch_stop_loss_pips': self._safe_float_value(get_value('batch_stop_loss_pips', cycle.batch_stop_loss_pips)),
+                'zone_range_pips': self._safe_float_value(get_value('zone_range_pips', cycle.zone_range_pips)),
+                'direction_switched': get_value('direction_switched', cycle.direction_switched),
+                'direction_switches': self._serialize_data(get_value('direction_switches', cycle.direction_switches)),
+                'next_order_index': self._safe_int_value(get_value('next_order_index', cycle.next_order_index)),
+                'done_price_levels': self._serialize_data(get_value('done_price_levels', cycle.done_price_levels)),
+                'active_orders': self._serialize_data(get_value('active_orders', cycle.active_orders)),
+                'completed_orders': self._serialize_data(get_value('completed_orders', cycle.completed_orders)),
+                'current_batch_id': get_value('current_batch_id', cycle.current_batch_id),
+                'last_order_price': self._safe_float_value(get_value('last_order_price', cycle.last_order_price)),
+                'last_order_time': self._safe_datetime_string(get_value('last_order_time', cycle.last_order_time)),
+                'accumulated_loss': self._safe_float_value(get_value('accumulated_loss', cycle.accumulated_loss)),
+                'batch_losses': self._safe_float_value(get_value('batch_losses', cycle.batch_losses)),
+                'close_reason': get_value('close_reason', cycle.close_reason),
+                'close_time': self._safe_datetime_string(get_value('close_time', cycle.close_time)),
+                'total_orders': self._safe_int_value(get_value('total_orders', cycle.total_orders)),
+                'profitable_orders': self._safe_int_value(get_value('profitable_orders', cycle.profitable_orders)),
+                'loss_orders': self._safe_int_value(get_value('loss_orders', cycle.loss_orders)),
+                'duration_minutes': self._safe_int_value(get_value('duration_minutes', cycle.duration_minutes)),
+                'reversal_threshold_pips': self._safe_float_value(get_value('reversal_threshold_pips', cycle.reversal_threshold_pips)),
+                'highest_buy_price': self._safe_float_value(get_value('highest_buy_price', cycle.highest_buy_price)),
+                'lowest_sell_price': self._safe_float_value(get_value('lowest_sell_price', cycle.lowest_sell_price)),
+                'reversal_count': self._safe_int_value(get_value('reversal_count', cycle.reversal_count)),
+                'closed_orders_pl': self._safe_float_value(get_value('closed_orders_pl', cycle.closed_orders_pl)),
+                'open_orders_pl': self._safe_float_value(get_value('open_orders_pl', cycle.open_orders_pl)),
+                'total_cycle_pl': self._safe_float_value(get_value('total_cycle_pl', cycle.total_cycle_pl)),
+                'last_reversal_time': self._safe_datetime_string(get_value('last_reversal_time', cycle.last_reversal_time)),
+                'reversal_history': self._serialize_data(get_value('reversal_history', cycle.reversal_history)),
                 
                 # Recovery mode fields
                 'in_recovery_mode': cycle.in_recovery_mode,
@@ -1083,7 +1165,7 @@ class AdvancedCyclesTrader(Strategy):
             return False
 
     async def _close_single_cycle(self, cycle_id: str, username: str) -> bool:
-        """Close a single cycle"""
+        """Close a single cycle with enhanced data preservation"""
         try:
             #sync with pocketbase
             self._sync_cycles_with_pocketbase()
@@ -1092,41 +1174,41 @@ class AdvancedCyclesTrader(Strategy):
                 logger.warning(f"Cycle not found: {cycle_id}")
                 return False
             
-            # Store final cycle data before closing orders
-            final_cycle_data = {
-                'total_profit': cycle.total_profit,
-                'total_volume': cycle.total_volume,
-                'direction': cycle.direction,
-                'current_direction': cycle.current_direction,
-                'active_orders': cycle.active_orders.copy() if hasattr(cycle, 'active_orders') else [],
-                'completed_orders': cycle.completed_orders.copy() if hasattr(cycle, 'completed_orders') else [],
-                'orders': cycle.orders.copy() if hasattr(cycle, 'orders') else []
-            }
+            logger.info(f"🔄 Starting enhanced close process for cycle {cycle_id}")
+            
+            # Create comprehensive snapshot BEFORE any modifications
+            cycle_snapshot = self._create_cycle_snapshot(cycle)
+            if not cycle_snapshot:
+                logger.error(f"❌ Failed to create snapshot for cycle {cycle_id}")
+                return False
+            
+            logger.info(f"📸 Created snapshot for cycle {cycle_id} with {len(cycle_snapshot.get('active_orders', []))} active and {len(cycle_snapshot.get('completed_orders', []))} completed orders")
             
             # Close all orders in the cycle
             closed_orders = await self._close_all_cycle_orders(cycle)
+            logger.info(f"🔒 Closed {closed_orders} orders in MT5 for cycle {cycle_id}")
             
             # Convert orders status to inactive
             await self._update_orders_status_to_inactive(cycle)
+            logger.info(f"📋 Updated order statuses to inactive for cycle {cycle_id}")
             
-            # Restore final cycle data
-            cycle.total_profit = final_cycle_data['total_profit']
-            cycle.total_volume = final_cycle_data['total_volume']
-            cycle.direction = final_cycle_data['direction']
-            cycle.current_direction = final_cycle_data['current_direction']
-            cycle.orders = final_cycle_data['orders']
-            cycle.completed_orders = final_cycle_data['completed_orders'] + final_cycle_data['active_orders']
-            cycle.active_orders = []  # Clear active orders since they're now completed
-            
-            # Update cycle status to closed (but don't remove from active yet)
+            # Update cycle status to closed
             cycle.is_closed = True
             cycle.is_active = False
             cycle.close_reason = "manual"
             cycle.closed_by = username
             cycle.close_time = datetime.datetime.now()
-            
-            # Update cycle in database with is_closed=True
-            await self._update_cycle_in_database(cycle)
+            cycle.orders = cycle_snapshot.get('orders', [])
+            cycle.closing_method ={
+                'type': 'manual',
+                'username': username,
+                'close_time': datetime.datetime.now().isoformat()
+            }
+            cycle.status = 'CLOSED'
+
+            # Update cycle in database using the snapshot (preserves original order data)
+            logger.info(f"💾 Updating database for cycle {cycle_id} using snapshot data")
+            await self._update_cycle_in_database(cycle, use_snapshot=False, snapshot=cycle_snapshot)
             
             # Update in-memory statistics
             self._update_cycle_statistics_on_close(cycle)
@@ -1134,10 +1216,10 @@ class AdvancedCyclesTrader(Strategy):
             # Remove from active cycles after database update
             self._remove_cycle_from_active(cycle)
             
-            logger.info(f"Cycle {cycle_id} closed successfully ({closed_orders} orders) - Database updated with is_closed=True")
+            logger.info(f"✅ Cycle {cycle_id} closed successfully ({closed_orders} orders) - Database updated with complete order data")
             return True
         except Exception as e:
-            logger.error(f"Error closing cycle {cycle_id}: {e}")
+            logger.error(f"❌ Error closing cycle {cycle_id}: {e}")
             return False
 
     def _update_cycle_statistics_on_close(self, cycle):
@@ -1208,7 +1290,8 @@ class AdvancedCyclesTrader(Strategy):
                     closed_count += 1
                     cycle.active_orders.remove(order)
                     cycle.completed_orders.append(order)
-            
+                
+            cycle.orders = cycle.active_orders + cycle.completed_orders
             return closed_count
             
         except Exception as e:
@@ -1237,6 +1320,360 @@ class AdvancedCyclesTrader(Strategy):
                 
         except Exception as e:
             logger.error(f"Error closing order {order_ticket}: {e}")
+            return False
+
+    def _enhanced_close_order(self, order_data: dict, max_retries: int = 3) -> bool:
+        """Enhanced order closing with retry logic and detailed error handling"""
+        try:
+            # Validate order data
+            if not order_data:
+                logger.error("❌ No order data provided for closing")
+                return False
+                
+            order_ticket = order_data.get('ticket')
+            if not order_ticket:
+                logger.error(f"❌ Order data missing ticket: {order_data}")
+                return False
+                
+            # Log detailed order information
+            logger.info(f"🔍 Attempting to close order {order_ticket}")
+            logger.info(f"📋 Order data: {order_data}")
+            
+            # Check MT5 connection status
+            if not self._check_mt5_connection_status():
+                logger.error("❌ MT5 connection issues - cannot close order")
+                return False
+            
+            # Validate order before attempting to close
+            if not self._validate_order_before_close(order_data):
+                logger.warning(f"⚠️ Order {order_ticket} validation failed - may already be closed")
+                # Return True if order doesn't exist (already closed)
+                return True
+            
+            # Validate required fields
+            required_fields = ['symbol', 'type', 'volume']
+            missing_fields = [field for field in required_fields if not order_data.get(field)]
+            if missing_fields:
+                logger.warning(f"⚠️ Order missing fields: {missing_fields}")
+                # Try to get missing data from MT5
+                order_data = self._enrich_order_data(order_data)
+            
+            # Retry logic with exponential backoff
+            for attempt in range(max_retries):
+                try:
+                    logger.info(f"🔄 Close attempt {attempt + 1}/{max_retries} for order {order_ticket}")
+                    
+                    # Try primary close method
+                    result = self.meta_trader.close_position(order_data)
+                    
+                    if result:
+                        logger.info(f"✅ Successfully closed order {order_ticket} on attempt {attempt + 1}")
+                        return True
+                    else:
+                        logger.warning(f"⚠️ Close attempt {attempt + 1} failed for order {order_ticket}")
+                        
+                        # Try alternative close method if primary fails
+                        if attempt == max_retries - 1:  # Last attempt
+                            logger.info(f"🔄 Trying alternative close method for order {order_ticket}")
+                            alt_result = self._alternative_close_order(order_ticket)
+                            if alt_result:
+                                logger.info(f"✅ Alternative close successful for order {order_ticket}")
+                                return True
+                        
+                        # Wait before retry (exponential backoff)
+                        if attempt < max_retries - 1:
+                            wait_time = 2 ** attempt  # 1, 2, 4 seconds
+                            logger.info(f"⏳ Waiting {wait_time} seconds before retry...")
+                            import time
+                            time.sleep(wait_time)
+                            
+                except Exception as e:
+                    logger.error(f"❌ Error on close attempt {attempt + 1} for order {order_ticket}: {e}")
+                    if attempt == max_retries - 1:
+                        break
+                    import time
+                    time.sleep(1)
+            
+            logger.error(f"❌ Failed to close order {order_ticket} after {max_retries} attempts")
+            return False
+            
+        except Exception as e:
+            logger.error(f"❌ Error in enhanced close order: {e}")
+            return False
+
+    def _enrich_order_data(self, order_data: dict) -> dict:
+        """Enrich order data with information from MT5 if missing"""
+        try:
+            order_ticket = order_data.get('ticket')
+            if not order_ticket:
+                return order_data
+                
+            # Try to get position info from MT5
+            positions = self.meta_trader.get_all_positions()
+            for position in positions:
+                if str(getattr(position, 'ticket', '')) == str(order_ticket):
+                    # Enrich order data with position info
+                    enriched_data = order_data.copy()
+                    enriched_data['symbol'] = enriched_data.get('symbol') or getattr(position, 'symbol', '')
+                    enriched_data['type'] = enriched_data.get('type') or getattr(position, 'type', 0)
+                    enriched_data['volume'] = enriched_data.get('volume') or getattr(position, 'volume', 0.0)
+                    enriched_data['magic_number'] = enriched_data.get('magic_number') or getattr(position, 'magic', 0)
+                    
+                    logger.info(f"✅ Enriched order data for ticket {order_ticket}")
+                    return enriched_data
+            
+            logger.warning(f"⚠️ Could not enrich order data for ticket {order_ticket}")
+            return order_data
+            
+        except Exception as e:
+            logger.error(f"❌ Error enriching order data: {e}")
+            return order_data
+
+    def _alternative_close_order(self, order_ticket: str) -> bool:
+        """Alternative close method using just the ticket number"""
+        try:
+            logger.info(f"🔄 Trying alternative close method for ticket {order_ticket}")
+            
+            # Try using the close_order method with just the ticket
+            result = self.meta_trader.close_order(order_ticket)
+            
+            if result:
+                logger.info(f"✅ Alternative close successful for ticket {order_ticket}")
+                return True
+            else:
+                logger.warning(f"⚠️ Alternative close failed for ticket {order_ticket}")
+                return False
+                
+        except Exception as e:
+            logger.error(f"❌ Error in alternative close method: {e}")
+            return False
+
+    def _validate_order_before_close(self, order_data: dict) -> bool:
+        """Validate order status and data before attempting to close"""
+        try:
+            order_ticket = order_data.get('ticket')
+            if not order_ticket:
+                logger.error("❌ No ticket found in order data")
+                return False
+            
+            # Check if order exists in MT5
+            positions = self.meta_trader.get_all_positions()
+            order_exists = False
+            
+            for position in positions:
+                try:
+                    # Handle different position object types
+                    if hasattr(position, 'ticket'):
+                        position_ticket = str(position.ticket)
+                    elif isinstance(position, dict):
+                        position_ticket = str(position.get('ticket', ''))
+                    elif isinstance(position, (int, str)):
+                        position_ticket = str(position)
+                    else:
+                        position_ticket = str(position)
+                    
+                    if position_ticket == str(order_ticket):
+                        order_exists = True
+                        logger.info(f"✅ Order {order_ticket} found in MT5 positions")
+                        break
+                except Exception as e:
+                    logger.warning(f"⚠️ Error processing position: {e}")
+                    continue
+            
+            if not order_exists:
+                logger.warning(f"⚠️ Order {order_ticket} not found in MT5 positions - may already be closed")
+                return False
+            
+            # Check if market is open
+            try:
+                symbol = order_data.get('symbol', '')
+                if symbol:
+                    # Try to get current price to check if market is accessible
+                    tick = self.meta_trader.symbol_info_tick(symbol)
+                    if not tick:
+                        logger.warning(f"⚠️ Cannot get tick data for {symbol} - market may be closed")
+                        return False
+            except Exception as e:
+                logger.warning(f"⚠️ Error checking market status: {e}")
+                # Continue anyway as this might be a temporary issue
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"❌ Error validating order before close: {e}")
+            return False
+
+    def _check_mt5_connection_status(self) -> bool:
+        """Check if MT5 connection is healthy"""
+        try:
+            # Check if MT5 is authorized
+            if not hasattr(self.meta_trader, 'authorized') or not self.meta_trader.authorized:
+                logger.error("❌ MT5 not authorized")
+                return False
+            
+            # Try to get account info to test connection
+            account_info = self.meta_trader.get_account_info()
+            if not account_info:
+                logger.error("❌ Cannot get account info - MT5 connection issue")
+                return False
+            
+            logger.info("✅ MT5 connection is healthy")
+            return True
+            
+        except Exception as e:
+            logger.error(f"❌ Error checking MT5 connection: {e}")
+            return False
+
+    def _create_cycle_snapshot(self, cycle) -> dict:
+        """Create a comprehensive snapshot of cycle state for database update"""
+        try:
+            # Create deep copies to avoid reference issues
+            active_orders = []
+            completed_orders = []
+            
+            # Copy active orders with enhanced data
+            for order in cycle.active_orders:
+                order_copy = order.copy() if isinstance(order, dict) else dict(order)
+                order_copy['status'] = 'active'  # Ensure status is preserved
+                order_copy['is_active'] = True
+                active_orders.append(order_copy)
+            
+            # Copy completed orders with enhanced data
+            for order in cycle.completed_orders:
+                order_copy = order.copy() if isinstance(order, dict) else dict(order)
+                order_copy['status'] = 'closed'  # Ensure status is preserved
+                order_copy['is_active'] = False
+                completed_orders.append(order_copy)
+            
+            # Create comprehensive snapshot
+            snapshot = {
+                'cycle_id': cycle.cycle_id,
+                'symbol': cycle.symbol,
+                'is_closed': cycle.is_closed,
+                'is_favorite': cycle.is_favorite,
+                'opened_by': cycle.opened_by,
+                'closing_method': cycle.closing_method,
+                'lot_idx': cycle.lot_idx,
+                'status': cycle.status,
+                'lower_bound': cycle.lower_bound,
+                'upper_bound': cycle.upper_bound,
+                'total_volume': cycle.total_volume,
+                'total_profit': cycle.total_profit,
+                'orders': cycle.orders.copy() if hasattr(cycle, 'orders') else [],
+                'orders_config': cycle.orders_config.copy() if hasattr(cycle, 'orders_config') else {},
+                'cycle_type': cycle.cycle_type,
+                'magic_number': cycle.magic_number,
+                'entry_price': cycle.entry_price,
+                'stop_loss': cycle.stop_loss,
+                'take_profit': cycle.take_profit,
+                'lot_size': cycle.lot_size,
+                'direction': cycle.direction,
+                'current_direction': cycle.current_direction,
+                'zone_base_price': cycle.zone_base_price,
+                'initial_threshold_price': cycle.initial_threshold_price,
+                'zone_threshold_pips': cycle.zone_threshold_pips,
+                'order_interval_pips': cycle.order_interval_pips,
+                'batch_stop_loss_pips': cycle.batch_stop_loss_pips,
+                'zone_range_pips': cycle.zone_range_pips,
+                'direction_switched': cycle.direction_switched,
+                'direction_switches': cycle.direction_switches.copy() if hasattr(cycle, 'direction_switches') else [],
+                'next_order_index': cycle.next_order_index,
+                'done_price_levels': cycle.done_price_levels.copy() if hasattr(cycle, 'done_price_levels') else [],
+                'active_orders': active_orders,
+                'completed_orders': completed_orders,
+                'orders': cycle.orders.copy() if hasattr(cycle, 'orders') else [],
+                'current_batch_id': cycle.current_batch_id,
+                'last_order_price': cycle.last_order_price,
+                'last_order_time': cycle.last_order_time,
+                'accumulated_loss': cycle.accumulated_loss,
+                'batch_losses': cycle.batch_losses,
+                'close_reason': cycle.close_reason,
+                'close_time': cycle.close_time,
+                'total_orders': cycle.total_orders,
+                'profitable_orders': cycle.profitable_orders,
+                'loss_orders': cycle.loss_orders,
+                'duration_minutes': cycle.duration_minutes,
+                'reversal_threshold_pips': cycle.reversal_threshold_pips,
+                'highest_buy_price': cycle.highest_buy_price,
+                'lowest_sell_price': cycle.lowest_sell_price,
+                'reversal_count': cycle.reversal_count,
+                'closed_orders_pl': cycle.closed_orders_pl,
+                'open_orders_pl': cycle.open_orders_pl,
+                'total_cycle_pl': cycle.total_cycle_pl,
+                'last_reversal_time': cycle.last_reversal_time,
+                'reversal_history': cycle.reversal_history.copy() if hasattr(cycle, 'reversal_history') else [],
+                'recovery_data': cycle.recovery_data.copy() if hasattr(cycle, 'recovery_data') else {},
+                'snapshot_timestamp': datetime.datetime.now().isoformat()
+            }
+            
+            logger.info(f"📸 Created comprehensive snapshot for cycle {cycle.cycle_id}")
+            logger.debug(f"Snapshot contains {len(active_orders)} active orders and {len(completed_orders)} completed orders")
+            
+            return snapshot
+            
+        except Exception as e:
+            logger.error(f"❌ Error creating cycle snapshot: {e}")
+            return None
+
+    def _validate_cycle_data_before_update(self, cycle_data: dict) -> bool:
+        """Validate cycle data before database update with enhanced error handling"""
+        try:
+            # Ensure cycle_data is a dictionary
+            if not isinstance(cycle_data, dict):
+                logger.error(f"❌ Cycle data is not a dictionary: {type(cycle_data)}")
+                return False
+            
+            # Check for required fields with fallback values
+            required_fields = ['cycle_id', 'symbol', 'total_profit', 'total_volume']
+            missing_fields = []
+            
+            for field in required_fields:
+                value = cycle_data.get(field)
+                if value is None or value == '':
+                    missing_fields.append(field)
+                    # Try to provide fallback values
+                    if field == 'cycle_id' and 'id' in cycle_data:
+                        cycle_data[field] = cycle_data['id']
+                        missing_fields.remove(field)
+                    elif field == 'total_volume':
+                        cycle_data[field] = 0.0
+                        missing_fields.remove(field)
+                    elif field == 'total_profit':
+                        cycle_data[field] = 0.0
+                        missing_fields.remove(field)
+                    elif field == 'symbol':
+                        cycle_data[field] = self.symbol
+                        missing_fields.remove(field)
+            
+            if missing_fields:
+                logger.error(f"❌ Cycle data missing required fields after fallback: {missing_fields}")
+                logger.error(f"❌ Cycle data: {cycle_data}")
+                return False
+            
+            # Validate orders data with type safety
+            active_orders = cycle_data.get('active_orders', [])
+            completed_orders = cycle_data.get('completed_orders', [])
+            
+            # Ensure orders are lists
+            if not isinstance(active_orders, list):
+                logger.warning(f"⚠️ Converting active_orders to list: {type(active_orders)}")
+                cycle_data['active_orders'] = [active_orders] if active_orders else []
+                active_orders = cycle_data['active_orders']
+                
+            if not isinstance(completed_orders, list):
+                logger.warning(f"⚠️ Converting completed_orders to list: {type(completed_orders)}")
+                cycle_data['completed_orders'] = [completed_orders] if completed_orders else []
+                completed_orders = cycle_data['completed_orders']
+            
+            logger.info(f"✅ Cycle data validation passed for {cycle_data.get('cycle_id')}")
+            logger.debug(f"Active orders: {len(active_orders)}, Completed orders: {len(completed_orders)}")
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"❌ Error validating cycle data: {e}")
+            import traceback
+            logger.error(f"❌ Traceback: {traceback.format_exc()}")
             return False
 
     def _find_cycle_by_id(self, cycle_id: str):
@@ -1406,7 +1843,7 @@ class AdvancedCyclesTrader(Strategy):
                     cycle._recalculate_total_profit()
                     
                     # Update database with latest profit information
-                    cycle._update_cycle_in_database()
+                    # cycle._update_cycle_in_database()
                         
                 except Exception as e:
                     logger.error(f"Error updating cycle {cycle.cycle_id}: {e}")
@@ -2555,23 +2992,13 @@ class AdvancedCyclesTrader(Strategy):
                 
             logger.info(f"🔴 Initial order stop loss hit for cycle {cycle.cycle_id}")
             
-            # Close the order in MT5
+            # Enhanced order closing with retry logic
             order_ticket = initial_order.get('ticket')
             if order_ticket:
-                # Create close order request
-                close_request = {
-                    'action': self.meta_trader.TRADE_ACTION_DEAL,
-                    'position': int(order_ticket),
-                    'magic': self.bot.magic_number,
-                    'volume': float(initial_order.get('volume', 0.0)),
-                    'type': 1 if initial_order.get('type') == 0 else 0,  # Reverse order type for closing
-                    'price': current_price,
-                    'deviation': 20,
-                    'comment': f"stop_loss_{order_ticket}"
-                }
+                logger.info(f"🔍 Attempting to close initial order {order_ticket} with enhanced method")
                 
-                # Close position
-                close_result = self.meta_trader.close_position(close_request)
+                # Use enhanced close method with retry logic
+                close_result = self._enhanced_close_order(initial_order, max_retries=3)
                 
                 if close_result:
                     logger.info(f"✅ Closed initial order {order_ticket} at stop loss")
@@ -2588,8 +3015,14 @@ class AdvancedCyclesTrader(Strategy):
                         cycle.active_orders.remove(initial_order)
                         cycle.completed_orders.append(initial_order)
                 else:
-                    logger.error(f"❌ Failed to close initial order {order_ticket}")
-                    return
+                    logger.error(f"❌ Failed to close initial order {order_ticket} after all retry attempts")
+                    logger.warning(f"⚠️ Proceeding with cycle closure despite order close failure")
+                    # Continue with cycle closure even if order close fails
+            
+            # Create snapshot before updating cycle status
+            cycle_snapshot = self._create_cycle_snapshot(cycle)
+            if cycle_snapshot:
+                logger.info(f"📸 Created snapshot for stop loss cycle {cycle.cycle_id}")
             
             # Update cycle status
             cycle.is_closed = True
@@ -2601,13 +3034,16 @@ class AdvancedCyclesTrader(Strategy):
             # Update orders status to inactive
             await self._update_orders_status_to_inactive(cycle)
             
-            # Update cycle in database
-            await self._update_cycle_in_database(cycle)
+            # Update cycle in database using snapshot if available
+            if cycle_snapshot:
+                await self._update_cycle_in_database(cycle, use_snapshot=True, snapshot=cycle_snapshot)
+            else:
+                await self._update_cycle_in_database(cycle)
             
             # Remove cycle from active management
             self._remove_cycle_from_active(cycle)
             
-            logger.info(f"Cycle {cycle.cycle_id} closed due to initial order stop loss")
+            logger.info(f"✅ Cycle {cycle.cycle_id} closed due to initial order stop loss")
                 
         except Exception as e:
             logger.error(f"Error closing initial order on stop loss: {e}")
@@ -2630,10 +3066,13 @@ class AdvancedCyclesTrader(Strategy):
                 
             logger.info(f"🔴 Initial order stop loss hit for cycle {cycle.cycle_id} - entering recovery mode")
             
-            # Close the initial order in MT5
-            order_ticket = initial_order['ticket']
+            # Enhanced order closing with retry logic
+            order_ticket = initial_order.get('ticket')
             if order_ticket:
-                close_result = self.meta_trader.close_position(initial_order)
+                logger.info(f"🔍 Attempting to close initial order {order_ticket} with enhanced method")
+                
+                # Use enhanced close method with retry logic
+                close_result = self._enhanced_close_order(initial_order, max_retries=3)
                 
                 if close_result:
                     logger.info(f"✅ Closed initial order {order_ticket} at stop loss")
@@ -2654,10 +3093,18 @@ class AdvancedCyclesTrader(Strategy):
                     self._setup_recovery_mode(cycle, current_price, initial_order)
                     
                 else:
-                    logger.error(f"❌ Failed to close initial order {order_ticket}")
-                    return
+                    logger.error(f"❌ Failed to close initial order {order_ticket} after all retry attempts")
+                    logger.warning(f"⚠️ Proceeding with recovery mode setup despite order close failure")
+                    # Continue with recovery mode setup even if order close fails
+                    self._setup_recovery_mode(cycle, current_price, initial_order)
             
-            logger.info(f"Cycle {cycle.cycle_id} entered recovery mode after initial stop loss")
+            # Create snapshot for recovery mode cycle
+            cycle_snapshot = self._create_cycle_snapshot(cycle)
+            if cycle_snapshot:
+                logger.info(f"📸 Created snapshot for recovery cycle {cycle.cycle_id}")
+                # Note: Database update will be handled by the calling async method
+            
+            logger.info(f"✅ Cycle {cycle.cycle_id} entered recovery mode after initial stop loss")
                 
         except Exception as e:
             logger.error(f"Error handling initial order stop loss for recovery: {e}")

@@ -27,9 +27,8 @@ class API:
             self.token = user_data.token
             self.user_id = user_data.record.id
             self.authenticated = user_data.is_valid
-            # The above code is setting the `user_name` attribute of an object to the value of
-            # `user_data.record.username`.
-            # self.user_name = user_data.record.username
+            # Set the user_name from the record
+            self.user_name = username
             self.user_email = user_data.record.email
             self.is_active = user_data.record.active
             return user_data
@@ -44,7 +43,13 @@ class API:
             self.client.auth_store.save(user_data.token)
             self.token = user_data.token
             self.authenticated = user_data.is_valid
-            print(f"Token refreshed for account {self.user_name}!")
+            
+            # Update user_name if it's not set or if we have fresh data
+            if not self.user_name and hasattr(user_data.record, 'username'):
+                self.user_name = user_data.record.username
+            
+            account_name = self.user_name if self.user_name else "Unknown"
+            print(f"Token refreshed for account {account_name}!")
             print(f"is authenticated: {self.authenticated}")
             return user_data
         except Exception as e:

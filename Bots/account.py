@@ -114,7 +114,8 @@ class Account:
         while True:
             try:
                 self.client.Refresh_token()
-                logger.info(f"Token refreshed for account {self.name}!")
+                account_name = self.name if self.name else f"Account_{self.meta_trader_id}" if self.meta_trader_id else "Unknown"
+                logger.info(f"Token refreshed for account {account_name}!")
             except (ConnectionError, TimeoutError) as e:
                 logger.error(
                     f"Failed to refresh token due to connection issue: {e}")

@@ -101,43 +101,12 @@ class Bot:
             elif self.strategy_name == "Advanced Cycles Trader":
                 # Use the new update_bot_config method
                 if hasattr(self.strategy, "_initialize_strategy_configuration"):
-                    # Create a task in the current event loop if one exists
                     try:
-                        loop = asyncio.get_event_loop()
-                        if loop.is_running():
-                            # Schedule the coroutine as a task in the running loop
-                            future = asyncio.run_coroutine_threadsafe(
-                                self.strategy._initialize_strategy_configuration(self.configs),
-                                loop
-                            )
-                            # Wait for the result with a timeout
-                            result = future.result(timeout=10)
-                            if result:
-                                print(f"Successfully updated Advanced Cycles Trader configuration")
-                            else:
-                                print(f"Failed to update Advanced Cycles Trader configuration")
-                        else:
-                            # If no loop is running, use run_until_complete
-                            result = loop.run_until_complete(
-                                self.strategy._initialize_strategy_configuration(self.configs)
-                            )
-                            if result:
-                                print(f"Successfully updated Advanced Cycles Trader configuration")
-                            else:
-                                print(f"Failed to update Advanced Cycles Trader configuration")
-                    except asyncio.TimeoutError:
-                        print(f"Timeout while updating Advanced Cycles Trader configuration")
-                    except RuntimeError:
-                        # If we can't get the event loop, create a new one
-                        loop = asyncio.new_event_loop()
-                        asyncio.set_event_loop(loop)
-                        result = loop.run_until_complete(
-                            self.strategy._initialize_strategy_configuration(self.configs)
-                        )
-                        if result:
-                            print(f"Successfully updated Advanced Cycles Trader configuration with new event loop")
-                        else:
-                            print(f"Failed to update Advanced Cycles Trader configuration with new event loop")
+                        # Call the method directly since it's not async
+                        self.strategy._initialize_strategy_configuration(self.configs)
+                        print(f"Successfully updated Advanced Cycles Trader configuration")
+                    except Exception as e:
+                        print(f"Failed to update Advanced Cycles Trader configuration: {e}")
                 else:
                     print(f"Advanced Cycles Trader does not support dynamic configuration updates")
             elif self.strategy_name == "StockTrader":
