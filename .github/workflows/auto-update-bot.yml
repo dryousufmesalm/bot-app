@@ -8,6 +8,8 @@ on:
 
 permissions:
   contents: write
+  actions: read
+  packages: write
 
 env:
   POCKETBASE_URL: ${{ secrets.POCKETBASE_URL }}
@@ -76,8 +78,6 @@ jobs:
     - name: Create GitHub Release
       id: github_release
       shell: pwsh
-      env:
-        GITHUB_TOKEN: ${{ secrets.TOKEN }}
       run: |
         Write-Host "🚀 Creating GitHub release v${{ steps.version.outputs.version }}..."
         
@@ -114,15 +114,39 @@ jobs:
         
         $releaseNotes | Out-File -FilePath "release-notes.md" -Encoding utf8
         
-        # Create release using gh CLI (this automatically creates the tag)
+        # Create release using GitHub API directly (more reliable than gh CLI)
         Write-Host "📦 Creating release with tag ${{ steps.version.outputs.tag }}..."
-        gh release create "${{ steps.version.outputs.tag }}" `
-          --title "Patrick Display Bot v${{ steps.version.outputs.version }}" `
-          --notes-file "release-notes.md" `
-          --latest `
-          "./dist/PatrickDisplayBot-v${{ steps.version.outputs.version }}.exe#Windows Executable"
         
+        $releaseData = @{
+          tag_name = "${{ steps.version.outputs.tag }}"
+          name = "Patrick Display Bot v${{ steps.version.outputs.version }}"
+          body = Get-Content -Path "release-notes.md" -Raw
+          draft = $false
+          prerelease = $false
+        } | ConvertTo-Json
+        
+        $headers = @{
+          "Authorization" = "token ${{ secrets.GITHUB_TOKEN }}"
+          "Accept" = "application/vnd.github.v3+json"
+        }
+        
+        $releaseResponse = Invoke-RestMethod -Uri "https://api.github.com/repos/${{ github.repository }}/releases" -Method POST -Body $releaseData -Headers $headers
         Write-Host "✅ GitHub release created successfully!"
+        
+        # Upload the asset
+        Write-Host "📤 Uploading executable asset..."
+        $assetUrl = $releaseResponse.upload_url -replace '\{\?name,label\}', "?name=PatrickDisplayBot-v${{ steps.version.outputs.version }}.exe"
+        
+        $filePath = "./dist/PatrickDisplayBot-v${{ steps.version.outputs.version }}.exe"
+        $fileBytes = [System.IO.File]::ReadAllBytes($filePath)
+        
+        $assetHeaders = @{
+          "Authorization" = "token ${{ secrets.GITHUB_TOKEN }}"
+          "Content-Type" = "application/octet-stream"
+        }
+        
+        $assetResponse = Invoke-RestMethod -Uri $assetUrl -Method POST -Body $fileBytes -Headers $assetHeaders
+        Write-Host "✅ Asset uploaded successfully!"
         
         # Set outputs for PocketBase
         $releaseUrl = "https://github.com/${{ github.repository }}/releases/tag/${{ steps.version.outputs.tag }}"
