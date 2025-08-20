@@ -5,6 +5,8 @@ from Views.globals.app_router import AppRoutes
 from Views.globals.app_logger import app_logger
 from fletx import Xview
 from Strategy.AdvancedCyclesTrader_Organized import AdvancedCyclesTrader
+from Strategy.MoveGuard import MoveGuard
+from Api.Events.flutter_event_system import get_strategy_manager
 
 
 class BotsPageView(Xview):
@@ -27,13 +29,19 @@ class BotsPageView(Xview):
             text_align=flet.TextAlign.CENTER,
         )
 
+        # Get the global strategy manager
+        strategy_manager = get_strategy_manager()
+
         bots_buttons = []
         for bot in bots:
             # Initialize strategy for each bot
             try:
-                if hasattr(bot, 'strategy') and bot.strategy == 'AdvancedCyclesTrader':
-                    meta_trader = store.get_state()['mt5'].get(user_id, {}).get(account_id)
-                    if meta_trader:
+                meta_trader = store.get_state()['mt5'].get(user_id, {}).get(account_id)
+                if meta_trader:
+                    strategy = None
+                    
+                    # Initialize strategy based on bot type
+                    if hasattr(bot, 'strategy') and bot.strategy == 'AdvancedCyclesTrader':
                         strategy = AdvancedCyclesTrader(
                             meta_trader=meta_trader,
                             config=bot.config,
@@ -41,11 +49,26 @@ class BotsPageView(Xview):
                             symbol=bot.symbol_name,
                             bot=bot
                         )
+                    elif hasattr(bot, 'strategy') and bot.strategy == 'MoveGuard':
+                        strategy = MoveGuard(
+                            meta_trader=meta_trader,
+                            config=bot.config,
+                            client=auth,
+                            symbol=bot.symbol_name,
+                            bot=bot
+                        )
+                    
+                    if strategy:
                         if not strategy.initialize():
                             app_logger.error(f"Failed to initialize strategy for bot {bot.id}")
                         else:
                             app_logger.info(f"Successfully initialized strategy for bot {bot.id}")
                             bot.strategy_instance = strategy
+                            
+                            # Register strategy with the strategy manager for event routing
+                            strategy_manager.register_strategy(bot.id, strategy)
+                            app_logger.info(f"✅ Strategy registered with event manager for bot {bot.id}")
+                            
             except Exception as e:
                 app_logger.error(f"Error initializing strategy for bot {bot.id}: {e}")
 

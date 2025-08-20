@@ -797,4 +797,28 @@ class MultiCycleManager:
             return 0
         except Exception as e:
             logger.error(f"Error calculating cycle duration: {e}")
+            return 0
+    
+    def clear_all_cycles(self):
+        """
+        Clear all cycles from the manager
+        
+        Returns:
+            int: Number of cycles cleared
+        """
+        try:
+            with self.cycle_modification_lock:
+                cycle_count = len(self.active_cycles)
+                
+                # Clear all storage dictionaries
+                self.active_cycles.clear()
+                self.zone_cycles.clear()
+                self.direction_cycles.clear()
+                self.cycle_creation_times.clear()
+                
+                logger.info(f"🧹 Cleared all {cycle_count} cycles from manager")
+                return cycle_count
+                
+        except Exception as e:
+            logger.error(f"Error clearing all cycles: {e}")
             return 0 

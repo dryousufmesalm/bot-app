@@ -101,14 +101,17 @@ class CloseCycleEventHandler(EventHandler):
                 response_event["details"]["error"] = "Strategy not found"
                 return False
             
-            # Execute close cycle on the strategy
-            content = {
-                'id': cycle_id,
-                'user_name': username,
-                'sent_from': 'flutter_app'
+            # Format event for strategy handle_event method
+            strategy_event = {
+                'message': 'close_cycle',
+                'content': {
+                    'id': cycle_id,
+                    'user_name': username,
+                    'sent_from': 'flutter_app'
+                }
             }
             
-            result = await strategy._handle_close_cycle_event(content)
+            result = await strategy.handle_event(strategy_event)
             
             # Update response with results
             response_event["details"].update({
@@ -135,14 +138,17 @@ class CloseCycleEventHandler(EventHandler):
                 response_event["details"]["error"] = "Strategy not found"
                 return False
             
-            # Execute close all cycles on the strategy
-            content = {
-                'id': 'all',
-                'user_name': username,
-                'sent_from': 'flutter_app'
+            # Format event for strategy handle_event method
+            strategy_event = {
+                'message': 'close_cycle',
+                'content': {
+                    'id': 'all',
+                    'user_name': username,
+                    'sent_from': 'flutter_app'
+                }
             }
             
-            result = await strategy._handle_close_cycle_event(content)
+            result = await strategy.handle_event(strategy_event)
             
             # Update response with results
             response_event["details"].update({
@@ -164,17 +170,23 @@ class CloseCycleEventHandler(EventHandler):
         try:
             # Create event record in PocketBase Events collection for Flutter app to receive
             event_record = {
-                "event_type": response_data["type"],
-                "bot_id": response_data.get("bot_id", ""),
-                "account_id": response_data.get("account_id", ""),
-                "user_name": response_data.get("user_name", "bot_app"),
-                "timestamp": response_data["timestamp"],
-                "status": response_data["status"],
-                "data": json.dumps(response_data),
                 "uuid": response_data["uuid"],
-                "response_to": response_data.get("original_event_uuid", ""),
-                "source": "bot_app",
-                "target": "flutter_app"
+                "account": response_data.get("account_id", ""),
+                "bot": response_data.get("bot_id", ""),
+                "strategy": response_data.get("strategy_id", ""),
+                "content": {
+                    "event_type": response_data["type"],
+                    "bot_id": response_data.get("bot_id", ""),
+                    "account_id": response_data.get("account_id", ""),
+                    "user_name": response_data.get("user_name", "bot_app"),
+                    "timestamp": response_data["timestamp"],
+                    "status": response_data["status"],
+                    "message": response_data.get("message", ""),
+                    "response_to": response_data.get("original_event_uuid", ""),
+                    "source": "bot_app",
+                    "target": "flutter_app",
+                    "details": response_data.get("details", {})
+                }
             }
             
             # Send to PocketBase
@@ -225,7 +237,12 @@ class EventRouter:
         try:
             strategy = self.strategy_manager.get_strategy_by_bot_id(event.botId)
             if strategy:
-                return await strategy._handle_open_order_event(event.contents)
+                # Format event for strategy handle_event method
+                strategy_event = {
+                    'message': 'open_order',
+                    'content': event.contents
+                }
+                return await strategy.handle_event(strategy_event)
             return False
         except Exception as e:
             logger.error(f"Error handling open order event: {e}")
@@ -236,7 +253,12 @@ class EventRouter:
         try:
             strategy = self.strategy_manager.get_strategy_by_bot_id(event.botId)
             if strategy:
-                return await strategy._handle_close_order_event(event.contents)
+                # Format event for strategy handle_event method
+                strategy_event = {
+                    'message': 'close_order',
+                    'content': event.contents
+                }
+                return await strategy.handle_event(strategy_event)
             return False
         except Exception as e:
             logger.error(f"Error handling close order event: {e}")
@@ -258,8 +280,22 @@ class FlutterEventListener:
             
             # Subscribe to Events collection for real-time updates
             def handle_event_update(event_data):
-                # Process event in background
-                asyncio.create_task(self._process_flutter_event(event_data))
+                try:
+                    # Get the current event loop
+                    try:
+                        loop = asyncio.get_running_loop()
+                    except RuntimeError:
+                        # No event loop running, create a new one
+                        loop = asyncio.new_event_loop()
+                        asyncio.set_event_loop(loop)
+                    
+                    # Create task in the current loop
+                    task = loop.create_task(self._process_flutter_event(event_data))
+                    # Add error handling for the task
+                    task.add_done_callback(lambda t: self._handle_task_result(t))
+                    
+                except Exception as e:
+                    logger.error(f"Error in event callback: {e}")
             
             # Set up PocketBase real-time subscription
             self.api_client.subscribe_events(handle_event_update)
@@ -269,11 +305,20 @@ class FlutterEventListener:
         except Exception as e:
             logger.error(f"Error starting Flutter event listener: {e}")
     
+    def _handle_task_result(self, task):
+        """Handle task completion and any exceptions"""
+        try:
+            if task.exception():
+                logger.error(f"Task failed with exception: {task.exception()}")
+        except Exception as e:
+            logger.error(f"Error handling task result: {e}")
+
     async def _process_flutter_event(self, event_data):
         '''Process individual event from Flutter app'''
         try:
             # Check if event is from Flutter app and not already processed
-            source = event_data.get('source', '')
+            content = event_data.get('content', {})
+            source = content.get('source', '')
             event_uuid = event_data.get('uuid', '')
             
             if source != 'flutter_app' or event_uuid in self.processed_events:
@@ -282,16 +327,16 @@ class FlutterEventListener:
             # Mark as processed
             self.processed_events.add(event_uuid)
             
-            # Parse event data
-            event_contents = json.loads(event_data.get('data', '{}'))
+            # Parse event data from content
+            event_contents = content
             
             # Create TradeEvent object
             trade_event = TradeEvent(
                 uuid=event_uuid,
-                accountId=event_data.get('account_id', ''),
+                accountId=content.get('account_id', ''),
                 contents=event_contents,
-                botId=event_data.get('bot_id', ''),
-                strategyId=event_contents.get('strategy_id', '')
+                botId=content.get('bot_id', ''),
+                strategyId=content.get('strategy_id', '')
             )
             
             # Route to appropriate handler

@@ -25,17 +25,23 @@ class FlutterEventCommunicator:
         try:
             # Create event record for Flutter app
             event_record = {
-                "event_type": event_data.get("type", "unknown"),
-                "bot_id": event_data.get("bot_id", ""),
-                "account_id": event_data.get("account_id", ""),
-                "user_name": event_data.get("user_name", "bot_app"),
-                "timestamp": event_data.get("timestamp", datetime.now().isoformat()),
-                "status": event_data.get("status", "sent"),
-                "data": json.dumps(event_data),
                 "uuid": event_data.get("uuid", f"bot_{int(time.time() * 1000)}"),
-                "source": "bot_app",
-                "target": "flutter_app",
-                "response_to": event_data.get("response_to", "")
+                "account": event_data.get("account_id", ""),
+                "bot": event_data.get("bot_id", ""),
+                "strategy": event_data.get("strategy_id", ""),
+                "content": {
+                    "event_type": event_data.get("type", "unknown"),
+                    "bot_id": event_data.get("bot_id", ""),
+                    "account_id": event_data.get("account_id", ""),
+                    "user_name": event_data.get("user_name", "bot_app"),
+                    "timestamp": event_data.get("timestamp", datetime.now().isoformat()),
+                    "status": event_data.get("status", "sent"),
+                    "message": event_data.get("message", ""),
+                    "source": "bot_app",
+                    "target": "flutter_app",
+                    "response_to": event_data.get("response_to", ""),
+                    "details": event_data.get("details", {})
+                }
             }
             
             # Create in PocketBase Events collection
@@ -51,14 +57,37 @@ class FlutterEventCommunicator:
             logger.error(f"Error sending event to Flutter app: {e}")
             return False
     
-    async def listen_for_flutter_events(self):
+    async def  listen_for_flutter_events(self):
         """Listen for events from Flutter app"""
         try:
             logger.info("🔄 Starting Flutter event listener...")
             
             # Set up real-time subscription to Events collection
             def handle_event_update(event_data):
-                asyncio.create_task(self._process_flutter_event(event_data))
+                try:
+                    # Get the current event loop
+                    try:
+                        loop = asyncio.get_running_loop()
+                    except RuntimeError:
+                        # No event loop running, create a new one
+                        loop = asyncio.new_event_loop()
+                        asyncio.set_event_loop(loop)
+                    
+                    # Create task in the current loop and store reference
+                    task = loop.create_task(self._process_flutter_event(event_data))
+                    # Add error handling for the task
+                    task.add_done_callback(lambda t: self._handle_task_result(t))
+                    
+                    # Store the task to prevent it from being garbage collected
+                    if not hasattr(self, '_active_tasks'):
+                        self._active_tasks = set()
+                    self._active_tasks.add(task)
+                    
+                    # Remove completed tasks from the set
+                    task.add_done_callback(lambda t: self._active_tasks.discard(t))
+                    
+                except Exception as e:
+                    logger.error(f"Error in event callback: {e}")
             
             # Subscribe to PocketBase Events collection
             self.api_client.subscribe_events(handle_event_update)
@@ -67,12 +96,38 @@ class FlutterEventCommunicator:
         except Exception as e:
             logger.error(f"Error starting Flutter event listener: {e}")
     
+    def _handle_task_result(self, task):
+        """Handle task completion and any exceptions"""
+        try:
+            if task.exception():
+                logger.error(f"Task failed with exception: {task.exception()}")
+        except Exception as e:
+            logger.error(f"Error handling task result: {e}")
+    
+    async def cleanup(self):
+        """Cleanup method to properly close the communicator"""
+        try:
+            # Cancel all active tasks
+            if hasattr(self, '_active_tasks'):
+                for task in self._active_tasks:
+                    if not task.done():
+                        task.cancel()
+                        try:
+                            await task
+                        except asyncio.CancelledError:
+                            pass
+                self._active_tasks.clear()
+            logger.info("✅ FlutterEventCommunicator cleaned up")
+        except Exception as e:
+            logger.error(f"Error during cleanup: {e}")
+
     async def _process_flutter_event(self, event_data):
         """Process incoming event from Flutter app"""
         try:
             # Check if event is from Flutter app
-            source = event_data.get('source', '')
-            target = event_data.get('target', '')
+            content = event_data.get('content', {})
+            source = content.get('source', '')
+            target = content.get('target', '')
             event_uuid = event_data.get('uuid', '')
             
             if source != 'flutter_app' or target != 'bot_app':
@@ -84,44 +139,45 @@ class FlutterEventCommunicator:
             # Mark as processed
             self.processed_events.add(event_uuid)
             
-            # Parse event data
-            event_contents = json.loads(event_data.get('data', '{}'))
-            event_type = event_data.get('event_type', '')
+            # Parse event data from content
+            event_type = content.get('event_type', '')
+            message = content.get('message', '')
             
             logger.info(f"📨 Received event from Flutter app: {event_type} - {event_uuid}")
             
             # Route to appropriate handler
             if event_type in ['close_cycle', 'close_all_cycles']:
-                await self._handle_close_cycle_event(event_data, event_contents)
+                await self._handle_close_cycle_event(event_data, content)
             elif event_type == 'open_order':
-                await self._handle_open_order_event(event_data, event_contents)
+                await self._handle_open_order_event(event_data, content)
             elif event_type == 'close_order':
-                await self._handle_close_order_event(event_data, event_contents)
+                await self._handle_close_order_event(event_data, content)
             else:
                 logger.warning(f"Unknown event type from Flutter: {event_type}")
                 
         except Exception as e:
             logger.error(f"Error processing Flutter event: {e}")
     
-    async def _handle_close_cycle_event(self, event_data, event_contents):
+    async def _handle_close_cycle_event(self, event_data, content):
         """Handle close cycle event from Flutter app"""
         try:
-            bot_id = event_data.get('bot_id')
-            cycle_id = event_contents.get('cycle_id')
-            action = event_contents.get('action', 'close_cycle')
-            username = event_data.get('user_name', 'flutter_app')
+            bot_id = content.get('bot_id')
+            cycle_id = content.get('cycle_id')
+            action = content.get('action', 'close_cycle')
+            username = content.get('user_name', 'flutter_app')
             
             # Create response structure
             response_event = {
                 "uuid": f"response_{event_data['uuid']}_{int(time.time() * 1000)}",
                 "type": "close_cycle_response",
                 "bot_id": bot_id,
-                "account_id": event_data.get('account_id', ''),
+                "account_id": content.get('account_id', ''),
                 "user_name": username,
                 "timestamp": datetime.now().isoformat(),
                 "status": "processing",
                 "action": action,
                 "cycle_id": cycle_id,
+                "message": "close_cycle_processing",
                 "response_to": event_data['uuid'],
                 "details": {
                     "received_at": datetime.now().isoformat(),
@@ -136,21 +192,27 @@ class FlutterEventCommunicator:
             strategy = self.strategy_manager.get_strategy_by_bot_id(bot_id)
             if not strategy:
                 response_event["status"] = "failed"
+                response_event["message"] = "strategy_not_found"
                 response_event["details"]["error"] = f"Strategy not found for bot {bot_id}"
                 await self.send_event_to_flutter(response_event)
                 return
             
-            # Execute the operation
-            content = {
-                'id': cycle_id if action == 'close_cycle' else 'all',
-                'user_name': username,
-                'sent_from': 'flutter_app'
+            # Format event for strategy handle_event method
+            strategy_event = {
+                'message': 'close_cycle',
+                'content': {
+                    'id': cycle_id if action == 'close_cycle' else 'all',
+                    'user_name': username,
+                    'sent_from': 'flutter_app'
+                }
             }
             
-            result = await strategy._handle_close_cycle_event(content)
+            # Execute the operation using strategy's handle_event method
+            result = await strategy.handle_event(strategy_event)
             
             # Send final response
             response_event["status"] = "completed" if result else "failed"
+            response_event["message"] = "close_cycle_completed" if result else "close_cycle_failed"
             response_event["details"].update({
                 "processing_completed": True,
                 "completed_at": datetime.now().isoformat(),
@@ -171,11 +233,58 @@ class FlutterEventCommunicator:
                 "uuid": f"error_{event_data['uuid']}_{int(time.time() * 1000)}",
                 "type": "close_cycle_response",
                 "status": "failed",
+                "message": "close_cycle_error",
                 "error": str(e),
                 "response_to": event_data['uuid'],
                 "timestamp": datetime.now().isoformat()
             }
             await self.send_event_to_flutter(error_response)
+
+    async def _handle_open_order_event(self, event_data, content):
+        """Handle open order event from Flutter app"""
+        try:
+            bot_id = content.get('bot_id')
+            strategy = self.strategy_manager.get_strategy_by_bot_id(bot_id)
+            if not strategy:
+                logger.error(f"Strategy not found for bot {bot_id}")
+                return False
+            
+            # Format event for strategy handle_event method
+            strategy_event = {
+                'message': 'open_order',
+                'content': content
+            }
+            
+            result = await strategy.handle_event(strategy_event)
+            logger.info(f"✅ Open order event processed: {result}")
+            return result
+            
+        except Exception as e:
+            logger.error(f"Error handling open order event: {e}")
+            return False
+
+    async def _handle_close_order_event(self, event_data, content):
+        """Handle close order event from Flutter app"""
+        try:
+            bot_id = content.get('bot_id')
+            strategy = self.strategy_manager.get_strategy_by_bot_id(bot_id)
+            if not strategy:
+                logger.error(f"Strategy not found for bot {bot_id}")
+                return False
+            
+            # Format event for strategy handle_event method
+            strategy_event = {
+                'message': 'close_order',
+                'content': content
+            }
+            
+            result = await strategy.handle_event(strategy_event)
+            logger.info(f"✅ Close order event processed: {result}")
+            return result
+            
+        except Exception as e:
+            logger.error(f"Error handling close order event: {e}")
+            return False
 
 class StrategyManager:
     """Manages strategy instances for event routing"""

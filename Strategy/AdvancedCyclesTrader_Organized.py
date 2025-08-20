@@ -18,6 +18,7 @@ from Strategy.components.multi_cycle_manager import MultiCycleManager
 from Strategy.components.enhanced_zone_detection import EnhancedZoneDetection
 from Strategy.components.enhanced_order_manager import EnhancedOrderManager
 from Strategy.components.reversal_detector import ReversalDetector
+from helpers.mt5_order_utils import MT5OrderUtils
 import asyncio
 import datetime
 import time
@@ -888,85 +889,81 @@ class AdvancedCyclesTrader(Strategy):
             return False
 
     async def _place_buy_order(self, order_params: dict, current_ask: float) -> bool:
-        """Place a buy order"""
+        """Place a buy order using unified MT5 order placement"""
         try:
-            # Create order in meta trader with all required parameters
-            order_data = self.meta_trader.buy(
+            logger.info(f"📈 ACT placing BUY order at {current_ask}")
+            
+            # Use unified MT5 order placement
+            success, order_data = MT5OrderUtils.place_buy_order(
+                meta_trader=self.meta_trader,
                 symbol=self.symbol,
-                volume=self.lot_size,
-                magic=self.bot.magic_number,
-                sl=0.0,
-                tp=0.0,
-                sltp_type="PIPS",
+                lot_size=self.lot_size,
+                magic_number=self.bot.magic_number,
+                stop_loss_pips=self.stop_loss_pips,
+                take_profit_pips=self.take_profit_pips,
                 slippage=20,
                 comment=f"ACT_BUY_{self.bot.id}"
             )
             
-            # Check if order was successful
-            if not order_data or len(order_data) == 0:
-                logger.error("Buy order failed - no order data returned")
+            if not success or not order_data:
+                logger.error("❌ Failed to place ACT BUY order via MT5")
                 return False
-                
-            # Create order data structure for cycle creation
-            processed_order_data = {
-                'price': current_ask,
-                'ticket': str(order_data[0].ticket),
-                'volume': self.lot_size,
-                'symbol': self.symbol,
-                'type': 0,  # BUY = 0
-                'magic_number': self.bot.magic_number,
-                'comment': f"ACT_BUY_{self.bot.id}",
-                'sl': 0.0,
-                'tp': 0.0
-            }
             
-            return await self._create_manual_cycle(
-                processed_order_data, "BUY", order_params['username'], 
+            # Create cycle with the order data
+            cycle_success = await self._create_manual_cycle(
+                order_data, "BUY", order_params['username'], 
                 order_params['sent_by_admin'], order_params['user_id']
             )
+            
+            if cycle_success:
+                logger.info("✅ ACT BUY order placed and cycle created successfully")
+                return True
+            else:
+                logger.error("❌ Failed to create ACT BUY cycle")
+                return False
+                
         except Exception as e:
-            logger.error(f"Error placing buy order: {e}")
+            logger.error(f"❌ Error placing ACT BUY order: {str(e)}")
+            logger.error(traceback.format_exc())
             return False
 
     async def _place_sell_order(self, order_params: dict, current_bid: float) -> bool:
-        """Place a sell order"""
+        """Place a sell order using unified MT5 order placement"""
         try:
-            # Create order in meta trader with all required parameters
-            order_data = self.meta_trader.sell(
+            logger.info(f"📉 ACT placing SELL order at {current_bid}")
+            
+            # Use unified MT5 order placement
+            success, order_data = MT5OrderUtils.place_sell_order(
+                meta_trader=self.meta_trader,
                 symbol=self.symbol,
-                volume=self.lot_size,
-                magic=self.bot.magic_number,
-                sl=0.0,
-                tp=0.0,
-                sltp_type="PIPS",
+                lot_size=self.lot_size,
+                magic_number=self.bot.magic_number,
+                stop_loss_pips=self.stop_loss_pips,
+                take_profit_pips=self.take_profit_pips,
                 slippage=20,
                 comment=f"ACT_SELL_{self.bot.id}"
             )
             
-            # Check if order was successful
-            if not order_data or len(order_data) == 0:
-                logger.error("Sell order failed - no order data returned")
+            if not success or not order_data:
+                logger.error("❌ Failed to place ACT SELL order via MT5")
                 return False
-                
-            # Create order data structure for cycle creation
-            processed_order_data = {
-                'price': current_bid,
-                'ticket': str(order_data[0].ticket),
-                'volume': self.lot_size,
-                'symbol': self.symbol,
-                'type': 1,  # SELL = 1
-                'magic_number': self.bot.magic_number,
-                'comment': f"ACT_SELL_{self.bot.id}",
-                'sl': 0.0,
-                'tp': 0.0
-            }
             
-            return await self._create_manual_cycle(
-                processed_order_data, "SELL", order_params['username'], 
+            # Create cycle with the order data
+            cycle_success = await self._create_manual_cycle(
+                order_data, "SELL", order_params['username'], 
                 order_params['sent_by_admin'], order_params['user_id']
             )
+            
+            if cycle_success:
+                logger.info("✅ ACT SELL order placed and cycle created successfully")
+                return True
+            else:
+                logger.error("❌ Failed to create ACT SELL cycle")
+                return False
+                
         except Exception as e:
-            logger.error(f"Error placing sell order: {e}")
+            logger.error(f"❌ Error placing ACT SELL order: {str(e)}")
+            logger.error(traceback.format_exc())
             return False
 
     async def _place_dual_orders(self, order_params: dict, current_prices: dict) -> bool:

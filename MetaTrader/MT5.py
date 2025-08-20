@@ -163,8 +163,14 @@ class MetaTrader:
             logger.error(f"Symbol {symbol} not found or not available")
             return []
             
-        ask = symbol_info.ask
-        bid = symbol_info.bid
+        # Prefer fresh tick prices when available
+        tick = None
+        try:
+            tick = Mt5.symbol_info_tick(symbol)
+        except Exception:
+            tick = None
+        ask = (tick.ask if tick and hasattr(tick, 'ask') else symbol_info.ask)
+        bid = (tick.bid if tick and hasattr(tick, 'bid') else symbol_info.bid)
         point = symbol_info.point
         pip = symbol_info.point*10
         
@@ -208,9 +214,17 @@ class MetaTrader:
         result = Mt5.order_send(request)
         if result is None:
             logger.error(f"order_send returned None - check MT5 connection and parameters. Request: {request}")
+            try:
+                logger.error(f"last_error: {Mt5.last_error()}")
+            except Exception:
+                pass
             return []
         if result.retcode != Mt5.TRADE_RETCODE_DONE:
             logger.error(f"order_send failed, retcode={result.retcode}, request: {request}")
+            try:
+                logger.error(f"last_error: {Mt5.last_error()}")
+            except Exception:
+                pass
             return []
         # request the result as a dictionary and display it element by element
         result_dict = result._asdict()
@@ -230,8 +244,14 @@ class MetaTrader:
             logger.error(f"Symbol {symbol} not found or not available")
             return []
             
-        ask = symbol_info.ask
-        bid = symbol_info.bid
+        # Prefer fresh tick prices when available
+        tick = None
+        try:
+            tick = Mt5.symbol_info_tick(symbol)
+        except Exception:
+            tick = None
+        ask = (tick.ask if tick and hasattr(tick, 'ask') else symbol_info.ask)
+        bid = (tick.bid if tick and hasattr(tick, 'bid') else symbol_info.bid)
         point = symbol_info.point
         pip = symbol_info.point*10
         
@@ -276,9 +296,17 @@ class MetaTrader:
         result = Mt5.order_send(request)
         if result is None:
             logger.error(f"order_send returned None - check MT5 connection and parameters. Request: {request}")
+            try:
+                logger.error(f"last_error: {Mt5.last_error()}")
+            except Exception:
+                pass
             return []
         if result.retcode != Mt5.TRADE_RETCODE_DONE:
             logger.error(f"order_send failed, retcode={result.retcode}, request: {request}")
+            try:
+                logger.error(f"last_error: {Mt5.last_error()}")
+            except Exception:
+                pass
             return []
 
         # request the result as a dictionary and display it element by element
@@ -350,7 +378,7 @@ class MetaTrader:
             "magic": magic,
             "comment": comment,
             "type_time": Mt5.ORDER_TIME_GTC,
-            "type_filling": Mt5.ORDER_FILLING_FOK,
+            "type_filling": Mt5.ORDER_FILLING_RETURN,
             "deviation": slippage
         }
         if tp > 0:
@@ -418,7 +446,7 @@ class MetaTrader:
             "magic": magic,
             "comment": comment,
             "type_time": Mt5.ORDER_TIME_GTC,
-            "type_filling": Mt5.ORDER_FILLING_FOK,
+            "type_filling": Mt5.ORDER_FILLING_RETURN,
             "deviation": slippage
         }
         if tp > 0:
@@ -554,7 +582,7 @@ class MetaTrader:
             "magic": magic,
             "comment": comment,
             "type_time": Mt5.ORDER_TIME_GTC,
-            "type_filling": Mt5.ORDER_FILLING_FOK,
+            "type_filling": Mt5.ORDER_FILLING_RETURN,
             "deviation": slippage
         }
         if tp > 0:
@@ -597,27 +625,57 @@ class MetaTrader:
                 action = getattr(order, 'type', None)
                 position_id = getattr(order, 'ticket', None)
                 lot = getattr(order, 'volume', None)
-                ea_magic_number = getattr(order, 'magic_number', None)
+                ea_magic_number = getattr(order, 'magic_number', getattr(order, 'magic', None))
                 
             # Check if we have all required fields
-            if not all([symbol, position_id, lot]):
+            if not all([position_id]):
                 logger.error(f"Missing required fields for close_position: symbol={symbol}, position_id={position_id}, lot={lot}")
                 return None
-                
+             
+            # Ensure the symbol is selected and get fresh prices
+            if symbol:
+                try:
+                    Mt5.symbol_select(symbol, True)
+                except Exception:
+                    pass
+            
+            tick = None
+            try:
+                tick = Mt5.symbol_info_tick(symbol) if symbol else None
+            except Exception:
+                tick = None
+            
             # Determine trade type and price based on action
             price = 0.0
             trade_type = 0
             
             if action == Mt5.ORDER_TYPE_BUY:
                 trade_type = Mt5.ORDER_TYPE_SELL
-                price = Mt5.symbol_info_tick(symbol).bid
+                price = (tick.bid if tick else 0.0)
             elif action == Mt5.ORDER_TYPE_SELL:
                 trade_type = Mt5.ORDER_TYPE_BUY
-                price = Mt5.symbol_info_tick(symbol).ask
+                price = (tick.ask if tick else 0.0)
             else:
                 # Default to market price if type is unknown
-                price = Mt5.symbol_info_tick(symbol).bid
+                price = (tick.bid if tick else 0.0)
                 trade_type = Mt5.ORDER_TYPE_SELL
+            
+            # Fallback to position volume if lot is missing/zero
+            if not lot or float(lot) <= 0.0:
+                lot = getattr(order, 'volume', None)
+            
+            # If still invalid, fetch the position again and extract volume
+            if (not lot or float(lot) <= 0.0) and position_id:
+                try:
+                    pos = Mt5.positions_get(ticket=position_id)
+                    if pos and len(pos) > 0:
+                        lot = getattr(pos[0], 'volume', 0.0)
+                except Exception:
+                    pass
+            
+            if not symbol or price <= 0.0 or not lot or float(lot) <= 0.0:
+                logger.error(f"close_position invalid params: symbol={symbol}, price={price}, lot={lot}, position_id={position_id}")
+                return None
             
             # Create close request
             close_request = {
@@ -636,6 +694,10 @@ class MetaTrader:
             
             # Send the close request as a single dictionary parameter
             result = Mt5.order_send(close_request)
+            if result is None:
+                logger.error(f"order_send returned None - request={close_request}")
+            elif getattr(result, 'retcode', None) != Mt5.TRADE_RETCODE_DONE:
+                logger.error(f"order_send failed retcode={result.retcode}, request={close_request}")
             return result
             
         except Exception as e:
@@ -714,6 +776,39 @@ class MetaTrader:
             
         except Exception as e:
             logger.error(f"Error in close_order: {e}")
+            return None
+
+    def modify_position_sl_tp(self, ticket: int, sl: float = 0.0, tp: float = 0.0):
+        """Modify SL/TP of an existing open position by ticket.
+
+        Args:
+            ticket: Position ticket ID
+            sl: Absolute SL price (0 to remove)
+            tp: Absolute TP price (0 to remove)
+
+        Returns:
+            The result of Mt5.order_send or None on error
+        """
+        try:
+            # Fetch position info to ensure it exists
+            positions = self.get_position_by_ticket(ticket)
+            if not positions or len(positions) == 0:
+                logger.error(f"modify_position_sl_tp: position {ticket} not found")
+                return None
+
+            request = {
+                "action": Mt5.TRADE_ACTION_SLTP,
+                "position": int(ticket),
+            }
+
+            # Only set sl/tp if > 0, otherwise send 0 to remove
+            request["sl"] = float(sl) if sl and sl > 0 else 0.0
+            request["tp"] = float(tp) if tp and tp > 0 else 0.0
+
+            result = Mt5.order_send(request)
+            return result
+        except Exception as e:
+            logger.error(f"Error in modify_position_sl_tp: {e}")
             return None
 
     # check if order is pending

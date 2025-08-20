@@ -656,3 +656,86 @@ class API:
         except Exception as e:
             logging.error(f"An error occurred while fetching active ACT cycles for bot: {e}")
             return []
+
+    # ==================== MOVEGUARD CYCLES METHODS ====================
+    def create_MG_cycle(self, data: Dict[str, Any]) -> Optional[Any]:
+        """Create a MoveGuard cycle with proper JSON serialization."""
+        try:
+            serialized_data = self.ensure_json_serializable(data)
+            result = self.client.collection("moveguard_cycles").create(serialized_data)
+            logging.info(f"✅ MoveGuard cycle creation successful: {result.id if result else 'NO_RESULT'}")
+            return result
+        except Exception as e:
+            logging.error(f"❌ Failed to create MoveGuard cycle: {str(e)}")
+            return None
+
+    def update_MG_cycle_by_id(self, cycle_id: str, data: Dict[str, Any]) -> Optional[Any]:
+        """Update a MoveGuard cycle by its ID."""
+        try:
+            return self.client.collection("moveguard_cycles").update(cycle_id, data)
+        except Exception as e:
+            logging.error(f"Failed to update MoveGuard cycle by ID: {e}")
+            return None
+
+    def get_MG_cycle_by_id(self, cycle_id: str):
+        """Get a MoveGuard cycle by its ID."""
+        try:
+            return self.client.collection("moveguard_cycles").get_full_list(200, {"filter": f"id = '{cycle_id}'"})
+        except Exception as e:
+            logging.error(f"Failed to get MoveGuard cycle by ID: {e}")
+            return None
+
+    def get_all_MG_active_cycles(self):
+        """Get all active MoveGuard cycles."""
+        try:
+            return self.client.collection("moveguard_cycles").get_full_list(200, {"filter": "is_closed = false"})
+        except Exception as e:
+            logging.error(f"An error occurred while fetching MoveGuard cycles: {e}")
+            return []
+
+    def get_all_MG_active_cycles_by_account(self, account_id: str):
+        """Get all active MoveGuard cycles by account."""
+        try:
+            return self.client.collection("moveguard_cycles").get_full_list(200, {"filter": f"account = '{account_id}' && is_closed = False"})
+        except Exception as e:
+            logging.error(f"An error occurred while fetching MoveGuard cycles by account: {e}")
+            return []
+
+    def get_all_MG_active_cycles_by_bot_id(self, bot_id: str):
+        """Get all active MoveGuard cycles by bot ID."""
+        try:
+            return self.client.collection("moveguard_cycles").get_full_list(200, {"filter": f"bot = '{bot_id}' && is_closed = false"})
+        except Exception as e:
+            logging.error(f"An error occurred while fetching MoveGuard cycles by bot ID: {e}")
+            return []
+
+    def close_MG_cycle(self, cycle_id: str):
+        """Close a MoveGuard cycle by its ID."""
+        try:
+            data = {"is_closed": True}
+            return self.client.collection("moveguard_cycles").update(cycle_id, data)
+        except Exception as e:
+            logging.error(f"Failed to close MoveGuard cycle: {e}")
+            return None
+
+    def get_MG_cycles_by_bot(self, bot_id: str):
+        """Get all MoveGuard cycles by bot ID."""
+        try:
+            if not bot_id:
+                logging.error("Bot ID is empty or None")
+                return []
+            filter_query = f"bot = '{bot_id}'"
+            cycles = self.client.collection("moveguard_cycles").get_full_list(200, {"filter": filter_query})
+            return cycles
+        except Exception as e:
+            logging.error(f"An error occurred while fetching MoveGuard cycles by bot: {e}")
+            return []
+
+    def get_MG_cycle_by_external_id(self, external_id: str):
+        """Get a MoveGuard cycle by its external ID (cycle_id field)."""
+        try:
+            filter_query = f"cycle_id = '{external_id}'"
+            return self.client.collection("moveguard_cycles").get_full_list(200, {"filter": filter_query})
+        except Exception as e:
+            logging.error(f"Failed to get MoveGuard cycle by external ID: {e}")
+            return None

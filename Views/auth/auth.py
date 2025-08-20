@@ -15,6 +15,7 @@ import multiprocessing
 from multiprocessing import Queue
 import logging
 from helpers.sync import MT5_LOCK, sync_manager
+from Api.Events.flutter_event_system import create_flutter_communicator
 
 # Create a Manager object
 
@@ -154,11 +155,15 @@ def launch_metatrader(data, authorized):
                 # Start cycles manager with error handling
                 task3 = asyncio.create_task(cyclesManager.run_in_thread())
 
+                # Initialize and start FlutterEventCommunicator for event handling
+                flutter_communicator = create_flutter_communicator(auth)
+                task4 = asyncio.create_task(flutter_communicator.listen_for_flutter_events())
+                
                 # Log successful startup
                 sync_logger.info("All background tasks started successfully")
 
                 # Wait for all tasks
-                await asyncio.gather(task1, task2, task3)
+                await asyncio.gather(task1, task2, task3, task4)
             except Exception as task_error:
                 app_logger.error(f"Error in background tasks: {task_error}")
                 sync_logger.error(f"Background task error: {task_error}")

@@ -5,6 +5,7 @@ from Strategy.AdaptiveHedging import AdaptiveHedging
 from Strategy.CycleTrader import CycleTrader
 from Strategy.AdvancedCyclesTrader_Organized import AdvancedCyclesTrader
 from Strategy.StockTrader import StockTrader
+from Strategy.MoveGuard import MoveGuard
 import asyncio
 
 
@@ -82,6 +83,26 @@ class Bot:
                             loop.run_until_complete(result)
                 except Exception as init_error:
                     print(f"Failed to initialize Advanced Cycles Trader: {init_error}")
+            elif self.strategy_name == "MoveGuard":
+                self.strategy = MoveGuard(
+                    self.meta_trader, self.configs, self.client, self.symbol_name, self)
+                # Check if initialize method is async and handle appropriately
+                try:
+                    result = self.strategy.initialize()
+                    if hasattr(result, '__await__'):
+                        # It's a coroutine, we need to run it in an event loop
+                        try:
+                            loop = asyncio.get_event_loop()
+                            if loop.is_running():
+                                asyncio.create_task(result)
+                            else:
+                                loop.run_until_complete(result)
+                        except RuntimeError:
+                            loop = asyncio.new_event_loop()
+                            asyncio.set_event_loop(loop)
+                            loop.run_until_complete(result)
+                except Exception as init_error:
+                    print(f"Failed to initialize MoveGuard: {init_error}")
             elif self.strategy_name == "Stock Trader":
                 self.strategy = StockTrader(
                     self.meta_trader, self.configs, self.client)
@@ -109,6 +130,17 @@ class Bot:
                         print(f"Failed to update Advanced Cycles Trader configuration: {e}")
                 else:
                     print(f"Advanced Cycles Trader does not support dynamic configuration updates")
+            elif self.strategy_name == "MoveGuard":
+                # Use the new update_bot_config method
+                if hasattr(self.strategy, "_initialize_strategy_configuration"):
+                    try:
+                        # Call the method directly since it's not async
+                        self.strategy._initialize_strategy_configuration(self.configs)
+                        print(f"Successfully updated MoveGuard configuration")
+                    except Exception as e:
+                        print(f"Failed to update MoveGuard configuration: {e}")
+                else:
+                    print(f"MoveGuard does not support dynamic configuration updates")
             elif self.strategy_name == "StockTrader":
                 self.strategy.update_configs(self.configs, self.settings)
             else:
@@ -129,7 +161,21 @@ class Bot:
         self.magic_number = bot.magic_number  # Add magic_number attribute for ACT strategy
         self.configs = bot.bot_configs
         self.settings = bot.settings
-        self.symbol_name = bot.bot_configs["symbol"]
+        
+        # Handle missing 'symbol' key in bot_configs
+        try:
+            self.symbol_name = bot.bot_configs["symbol"]
+        except KeyError:
+            # If symbol is not in bot_configs, try to get it from bot.symbol
+            if hasattr(bot, 'symbol') and bot.symbol:
+                self.symbol_name = bot.symbol
+                print(f"Using symbol from bot.symbol: {self.symbol_name}")
+            else:
+                # Set a default symbol or raise an error
+                print("Warning: No symbol found in bot configuration")
+                self.symbol_name = "EURUSD"  # Default fallback
+                print(f"Using default symbol: {self.symbol_name}")
+        
         self.symbol = bot.symbol
         self.name = bot.name
 
