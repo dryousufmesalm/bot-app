@@ -3793,23 +3793,23 @@ class MoveGuard(Strategy):
                         new_bottom = cycle.zone_data.get('lower_boundary', 0.0)
                         new_top = cycle.zone_data.get('upper_boundary', 0.0)
                     
-                # Update zone data
-                if not hasattr(cycle, 'zone_data') or not cycle.zone_data:
-                    cycle.zone_data = {}
-                
-                cycle.zone_data.update({
-                    'base_price': (new_top + new_bottom) / 2,
-                    'upper_boundary': new_top,
-                    'lower_boundary': new_bottom,
-                    'last_movement': {
-                        'direction': 'TRAILING_SL_BUY',
-                        'old_base': cycle.zone_data.get('base_price'),
-                        'new_base': (new_top + new_bottom) / 2,
-                        'highest_buy': new_top,
-                        'trailing_sl': new_bottom,
-                        'timestamp': datetime.datetime.now().isoformat()
-                    }
-                })
+                    # Update zone data
+                    if not hasattr(cycle, 'zone_data') or not cycle.zone_data:
+                        cycle.zone_data = {}
+                    
+                    cycle.zone_data.update({
+                        'base_price': (new_top + new_bottom) / 2,
+                        'upper_boundary': new_top,
+                        'lower_boundary': new_bottom,
+                        'last_movement': {
+                            'direction': 'TRAILING_SL_BUY',
+                            'old_base': cycle.zone_data.get('base_price'),
+                            'new_base': (new_top + new_bottom) / 2,
+                            'highest_buy': new_top,
+                            'trailing_sl': new_bottom,
+                            'timestamp': datetime.datetime.now().isoformat()
+                        }
+                    })
                 
                  # Close all active BUY orders
                 asyncio.create_task(self._close_all_cycle_orders(cycle))
@@ -3839,23 +3839,23 @@ class MoveGuard(Strategy):
                         new_top = cycle.zone_data.get('upper_boundary', 0.0)
                         new_bottom = cycle.zone_data.get('lower_boundary', 0.0)
                 
-                # Update zone data
-                if not hasattr(cycle, 'zone_data') or not cycle.zone_data:
-                    cycle.zone_data = {}
-                
-                cycle.zone_data.update({
-                    'base_price': (new_top + new_bottom) / 2,
-                    'upper_boundary': new_top,
-                    'lower_boundary': new_bottom,
-                    'last_movement': {
-                        'direction': 'TRAILING_SL_SELL',
-                        'old_base': cycle.zone_data.get('base_price'),
-                        'new_base': (new_top + new_bottom) / 2,
-                        'lowest_sell': new_bottom,
-                        'trailing_sl': new_top,
-                        'timestamp': datetime.datetime.now().isoformat()
-                    }
-                })
+                    # Update zone data
+                    if not hasattr(cycle, 'zone_data') or not cycle.zone_data:
+                        cycle.zone_data = {}
+                    
+                    cycle.zone_data.update({
+                        'base_price': (new_top + new_bottom) / 2,
+                        'upper_boundary': new_top,
+                        'lower_boundary': new_bottom,
+                        'last_movement': {
+                            'direction': 'TRAILING_SL_SELL',
+                            'old_base': cycle.zone_data.get('base_price'),
+                            'new_base': (new_top + new_bottom) / 2,
+                            'lowest_sell': new_bottom,
+                            'trailing_sl': new_top,
+                            'timestamp': datetime.datetime.now().isoformat()
+                        }
+                    })
                 
                # Close all active SELL orders
                 asyncio.create_task(self._close_all_cycle_orders(cycle))
