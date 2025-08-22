@@ -1474,25 +1474,22 @@ class MoveGuard(Strategy):
                         cycle.was_above_upper = True
                         logger.info(f"🎯 MoveGuard placing first BUY order - price {current_price} >= upper+offset {upper + initial_offset}")
                         self._place_initial_order(cycle, 'BUY', current_price)
-                        if self.zone_movement_mode == 'Move Both Sides' or self.zone_movement_mode == 'Move Up Only':
-                            cycle.lower_bound = upper-self.zone_threshold_pips * pip_value
-                            lower= cycle.lower_bound
-                            #update zone data
-                            cycle.zone_data['upper_boundary'] = upper
-                            cycle.zone_data['lower_boundary'] = lower
+                        cycle.lower_bound = upper-self.zone_threshold_pips * pip_value
+                        lower= cycle.lower_bound
+                        #update zone data
+                        cycle.zone_data['upper_boundary'] = upper
+                        cycle.zone_data['lower_boundary'] = lower
                         continue
                     elif current_price <= (lower - initial_offset):
                         cycle.direction = 'SELL'
                         cycle.was_below_lower = True
                         logger.info(f"🎯 MoveGuard placing first SELL order - price {current_price} <= lower-offset {lower - initial_offset}")
                         self._place_initial_order(cycle, 'SELL', current_price)
-                        
-                        if self.zone_movement_mode == 'Move Both Sides' or self.zone_movement_mode == 'Move Down Only':
-                            cycle.upper_bound = lower+self.zone_threshold_pips * pip_value
-                            upper= cycle.upper_bound
-                            #update zone data   
-                            cycle.zone_data['upper_boundary'] = upper
-                            cycle.zone_data['lower_boundary'] = lower
+                        cycle.upper_bound = lower+self.zone_threshold_pips * pip_value
+                        upper= cycle.upper_bound
+                        #update zone data   
+                        cycle.zone_data['upper_boundary'] = upper
+                        cycle.zone_data['lower_boundary'] = lower
                         continue
 
                 # Subsequent grid orders: price-based grid placement
@@ -3788,13 +3785,14 @@ class MoveGuard(Strategy):
 
                 highest_buy_price = max([o.get('price', 0.0) for o in getattr(cycle, 'orders', []) 
                                 if o.get('status') == 'active' and o.get('direction') == 'BUY'])
-                if highest_buy_price is not None:
-                    new_bottom = highest_buy_price - zone_threshold
-                    new_top = highest_buy_price
-                else:
-                    new_bottom = cycle.zone_data.get('lower_boundary', 0.0)
-                    new_top = cycle.zone_data.get('upper_boundary', 0.0)
-                
+                if self.zone_movement_mode == 'Move Both Sides' or self.zone_movement_mode == 'Move Up Only':
+                    if highest_buy_price is not None:
+                        new_bottom = highest_buy_price - zone_threshold
+                        new_top = highest_buy_price
+                    else:
+                        new_bottom = cycle.zone_data.get('lower_boundary', 0.0)
+                        new_top = cycle.zone_data.get('upper_boundary', 0.0)
+                    
                 # Update zone data
                 if not hasattr(cycle, 'zone_data') or not cycle.zone_data:
                     cycle.zone_data = {}
@@ -3833,12 +3831,13 @@ class MoveGuard(Strategy):
                
                 lowest_sell_price = min([o.get('price', 999999.0) for o in getattr(cycle, 'orders', []) 
                                 if o.get('status') == 'active' and o.get('direction') == 'SELL'])
-                if lowest_sell_price is not None:
-                    new_top = lowest_sell_price + zone_threshold
-                    new_bottom = lowest_sell_price
-                else:
-                    new_top = cycle.zone_data.get('upper_boundary', 0.0)
-                    new_bottom = cycle.zone_data.get('lower_boundary', 0.0)
+                if self.zone_movement_mode=='Move Both Sides' or self.zone_movement_mode=='Move Down Only':
+                    if lowest_sell_price is not None:
+                        new_top = lowest_sell_price + zone_threshold
+                        new_bottom = lowest_sell_price
+                    else:
+                        new_top = cycle.zone_data.get('upper_boundary', 0.0)
+                        new_bottom = cycle.zone_data.get('lower_boundary', 0.0)
                 
                 # Update zone data
                 if not hasattr(cycle, 'zone_data') or not cycle.zone_data:
