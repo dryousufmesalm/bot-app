@@ -374,6 +374,13 @@ class MoveGuard(Strategy):
                 pip_value = self._get_pip_value()
                 all_orders = cycle_data.get('orders', []) or []
                 entry = cycle_data.get('entry_price', 0.0) or 0.0
+                
+                # First, try to update order types from MT5 comments for active orders
+                for o in all_orders:
+                    if o.get('status') == 'active':
+                        # Create a temporary cycle object to use the update method
+                        temp_cycle = type('TempCycle', (), {'orders': [o], 'cycle_id': cycle_id})()
+                        self._update_order_type_from_mt5_comment(o)
                 for o in all_orders:
                     # Normalize price field
                     price = o.get('price')
@@ -440,30 +447,44 @@ class MoveGuard(Strategy):
                         # No grid interval available, mark as entry order
                         o['grid_level'] = 0
                         logger.debug(f"📊 Set grid_level=0 for order {o.get('order_id')} (no grid interval)")
-                    # Tag grid orders and set order types
+                    # Tag grid orders and set order types (only if order_type is not already set from MT5 comment)
                     grid_level = int(o.get('grid_level', 0))
-                    if grid_level == 0 and not o.get('is_initial'):
-                        # Mark as entry order (Level 0)
-                        o['is_initial'] = True
-                        o['is_grid'] = False
-                        o['order_type'] = 'initial'
-                        logger.debug(f"📊 Tagged entry order: order_id={o.get('order_id')}, grid_level={grid_level}")
-                    elif grid_level >= 1 and not o.get('is_grid'):
-                        # Mark as grid order (Level 1+)
-                        o['is_grid'] = True
-                        o['is_initial'] = False
-                        # Set order type based on grid level
-                        if grid_level == 1:
-                            o['order_type'] = 'grid_entry'
-                        else:
-                            o['order_type'] = f'grid_level_{grid_level}'
-                        logger.debug(f"📊 Tagged grid order: order_id={o.get('order_id')}, grid_level={grid_level}, order_type={o.get('order_type')}")
+                    current_order_type = o.get('order_type', '')
+                    
+                    # Only set order_type if it's not already set from MT5 comment
+                    if not current_order_type or current_order_type == 'unknown':
+                        if grid_level == 0 and not o.get('is_initial'):
+                            # Mark as entry order (Level 0)
+                            o['is_initial'] = True
+                            o['is_grid'] = True
+                            o['order_type'] = 'grid_0'
+                            logger.debug(f"📊 Tagged entry order: order_id={o.get('order_id')}, grid_level={grid_level}")
+                        elif grid_level >= 1 and not o.get('is_grid'):
+                            # Mark as grid order (Level 1+)
+                            o['is_grid'] = True
+                            o['is_initial'] = False
+                            # Set order type based on grid level
+                            if grid_level == 1:
+                                o['order_type'] = 'grid_entry'
+                            else:
+                                o['order_type'] = f'grid_level_{grid_level}'
+                            logger.debug(f"📊 Tagged grid order: order_id={o.get('order_id')}, grid_level={grid_level}, order_type={o.get('order_type')}")
+                    else:
+                        # Order type already set from MT5 comment, just ensure flags are correct
+                        if 'grid_0' in current_order_type.lower() or 'initial' in current_order_type.lower():
+                            o['is_initial'] = True
+                            o['is_grid'] = True
+                        elif 'grid' in current_order_type.lower():
+                            o['is_grid'] = True
+                            o['is_initial'] = False
+                        logger.debug(f"📊 Preserved existing order_type: order_id={o.get('order_id')}, order_type={current_order_type}")
                 
                 # Mark entry order (Level 0) - first order with grid_level 0
                 entry_order = next((o for o in all_orders if int(o.get('grid_level', 0)) == 0), None)
                 if entry_order and not entry_order.get('is_initial'):
                     entry_order['is_initial'] = True
-                    entry_order['order_type'] = 'cycle_entry'
+                    entry_order['order_type'] = 'grid_0'
+                    entry_order['is_grid'] = True
                     logger.debug(f"📊 Marked entry order: order_id={entry_order.get('order_id')}, grid_level={entry_order.get('grid_level')}")
                 
                 # Log summary of order processing
@@ -814,18 +835,23 @@ class MoveGuard(Strategy):
                             if old_grid_level != new_grid_level:
                                 order['grid_level'] = new_grid_level
                                 
-                                # Update order type and flags
+                                # Update order type and flags (preserve existing order_type from MT5 comment if available)
+                                current_order_type = order.get('order_type', '')
                                 if new_grid_level == 0:
                                     order['is_grid'] = False
                                     order['is_initial'] = True
-                                    order['order_type'] = 'initial'
+                                                                    # Only set order_type if not already set from MT5 comment
+                                if not current_order_type or current_order_type == 'unknown':
+                                    order['order_type'] = 'grid_0'
                                 else:
                                     order['is_grid'] = True
                                     order['is_initial'] = False
-                                    if new_grid_level == 1:
-                                        order['order_type'] = 'grid_entry'
-                                    else:
-                                        order['order_type'] = f'grid_level_{new_grid_level}'
+                                    # Only set order_type if not already set from MT5 comment
+                                    if not current_order_type or current_order_type == 'unknown':
+                                        if new_grid_level == 1:
+                                            order['order_type'] = 'grid_entry'
+                                        else:
+                                            order['order_type'] = f'grid_level_{new_grid_level}'
                                 
                                 fixed_count += 1
                                 logger.debug(f"📊 Force refreshed order {order.get('order_id')}: grid_level {old_grid_level} → {new_grid_level}")
@@ -1432,6 +1458,9 @@ class MoveGuard(Strategy):
                 if cycle.status != 'active':
                     continue
 
+                # Ensure order types are correctly set from MT5 comments before processing
+                self._ensure_order_types_from_mt5_comments(cycle)
+
                 # Initialize boundary tracking
                 if not hasattr(cycle, 'was_above_upper'):
                     cycle.was_above_upper = False
@@ -1506,11 +1535,11 @@ class MoveGuard(Strategy):
                     if cycle.direction == 'BUY':
                         # For BUY: grid starts above upper boundary
                         grid_start_price = upper + (entry_interval_pips * pip_value)
-                        target_price = grid_start_price + (grid_interval_pips * (grid_level - 1) * pip_value)
+                        target_price = grid_start_price + (grid_interval_pips * (grid_level) * pip_value)
                         
                         # Place order if price has reached or exceeded the target
                         if current_price >= target_price:
-                            logger.info(f"📈 BUY Grid Level {grid_level}: Price {current_price:.5f} >= Target {target_price:.5f}")
+                            logger.info(f"📈 BUY Grid Level {grid_level}: Price {current_price:.5f} >= Target {target_price:.5f} (Grid Start: {grid_start_price:.5f}, Interval: {grid_interval_pips} pips)")
                             self._place_grid_buy_order(cycle, current_price, grid_level)
                             cycle.highest_buy_price = max(cycle.highest_buy_price, current_price)
                             # Update trailing stop-loss after placing new buy order
@@ -1521,11 +1550,11 @@ class MoveGuard(Strategy):
                     elif cycle.direction == 'SELL':
                         # For SELL: grid starts below lower boundary
                         grid_start_price = lower - (entry_interval_pips * pip_value)
-                        target_price = grid_start_price - (grid_interval_pips * (grid_level - 1) * pip_value)
+                        target_price = grid_start_price - (grid_interval_pips * (grid_level) * pip_value)
                         
                         # Place order if price has reached or fallen below the target
                         if current_price <= target_price:
-                            logger.info(f"📉 SELL Grid Level {grid_level}: Price {current_price:.5f} <= Target {target_price:.5f}")
+                            logger.info(f"📉 SELL Grid Level {grid_level}: Price {current_price:.5f} <= Target {target_price:.5f} (Grid Start: {grid_start_price:.5f}, Interval: {grid_interval_pips} pips)")
                             self._place_grid_sell_order(cycle, current_price, grid_level)
                             cycle.lowest_sell_price = min(cycle.lowest_sell_price, current_price)
                             # Update trailing stop-loss after placing new sell order
@@ -1558,7 +1587,7 @@ class MoveGuard(Strategy):
                     price=current_price,
                     stop_loss=sl_price,
                     take_profit=0.0,
-                    comment="MoveGuard_Initial"
+                    comment="MoveGuard_Grid_0"
                 )
                 order_direction = 'BUY'
             else:
@@ -1570,7 +1599,7 @@ class MoveGuard(Strategy):
                     price=current_price,
                     stop_loss=sl_price,
                     take_profit=0.0,
-                    comment="MoveGuard_Initial"
+                    comment="MoveGuard_Grid_0"
                 )
                 order_direction = 'SELL'
 
@@ -1586,13 +1615,13 @@ class MoveGuard(Strategy):
                     'price': current_price,
                     'lot_size': self.lot_size,
                     'is_initial': True,
-                    'order_type': 'initial',
+                    'order_type': 'grid_0',
                     'status': 'active',
                     'placed_at': datetime.datetime.now().isoformat(),
                     'profit': 0.0,
                     'profit_pips': 0.0,
                     'last_profit_update': datetime.datetime.now().isoformat(),
-                    'grid_level': 1 ,
+                    'grid_level': 0,
                     'is_grid': True
                 }
                 if hasattr(cycle, 'orders'):
@@ -1604,16 +1633,16 @@ class MoveGuard(Strategy):
                     cycle.active_orders.append(order_info)
                 else:
                     cycle.active_orders = [order_info]
-                # Ensure grid data exists
+                # Ensure grid data exists (grid_0 order is part of the grid)
                 if not hasattr(cycle, 'grid_data') or not isinstance(cycle.grid_data, dict):
                     cycle.grid_data = {
-                        'current_level': 1,
+                        'current_level': 0,
                         'grid_direction': direction,
                         'last_grid_price': current_price,
-                        'grid_orders': [order_info]
+                        'grid_orders': []
                     }
-                else:
-                    cycle.grid_data['grid_orders'].append(order_info)
+                # Add grid_0 order to grid_orders list since it's part of the grid system
+                cycle.grid_data['grid_orders'].append(order_info)
                 
                 # Initialize trailing stop-loss for both BUY and SELL orders
                 self._update_trailing_stop_loss(cycle, current_price)
@@ -1627,22 +1656,23 @@ class MoveGuard(Strategy):
             return False
 
     def _remove_sl_from_first_order(self, cycle):
-        """Remove SL from the first order after second grid order is placed."""
+        """Remove SL from the first grid order after second grid order is placed."""
         try:
-            # Remove SL from the first grid order (not the initial order)
+            # Remove SL from the first grid order (grid_level 1, not grid_0)
             first_grid = None
-            # Prefer grid_data current_level==1 order if present
+            # Prefer grid_data grid_orders if present
             grid_orders = []
             gd = getattr(cycle, 'grid_data', {}) or {}
             if isinstance(gd, dict):
                 grid_orders = gd.get('grid_orders', []) if isinstance(gd.get('grid_orders'), list) else []
-            # Fallback: search in orders marked is_grid or with grid_level>=1
+            # Fallback: search in orders marked is_grid=True with grid_level 1
             for o in getattr(cycle, 'active_orders', []):
-                if o.get('status') == 'active' and (o.get('is_grid') or int(o.get('grid_level', -1)) >= 1):
+                if o.get('status') == 'active' and o.get('is_grid', False) and o.get('grid_level') == 1:
                     first_grid = o
                     break
-            if not first_grid and grid_orders:
-                first_grid = grid_orders[0]
+            if not first_grid and len(grid_orders) > 1:
+                # Skip grid_0 (index 0), take grid_1 (index 1)
+                first_grid = grid_orders[1] if len(grid_orders) > 1 else None
             if first_grid:
                 ticket = first_grid.get('order_id') or first_grid.get('ticket')
                 if ticket:
@@ -1652,15 +1682,15 @@ class MoveGuard(Strategy):
             logger.error(f"Error removing SL from first order: {e}")
 
     def _check_and_close_initial_order(self, cycle, current_price: float):
-        """Close the initial order if price hits its implicit SL threshold; keep cycle open."""
+        """Close the cycle entry order if price hits its implicit SL threshold; keep cycle open."""
         try:
             if self.initial_stop_loss_pips <= 0:
                 return
             pip_value = self._get_pip_value()
-            # Find active initial order (first non-grid order)
+            # Find active cycle entry order (marked as is_initial=True and is_grid=False)
             initial = None
             for o in getattr(cycle, 'orders', []):
-                if o.get('status') == 'active' and not o.get('is_grid') and int(o.get('grid_level', -1)) in (-1, 0):
+                if o.get('status') == 'active' and o.get('is_initial', False) and not o.get('is_grid', False):
                     initial = o
                     break
             if not initial:
@@ -1682,7 +1712,7 @@ class MoveGuard(Strategy):
                 if self._close_order(initial):
                     initial['status'] = 'closed'
                     initial['closed_at'] = datetime.datetime.now().isoformat()
-                    logger.info(f"Closed initial order at SL threshold for cycle {cycle.cycle_id}")
+                    logger.info(f"Closed cycle entry order at SL threshold for cycle {cycle.cycle_id}")
         except Exception as e:
             logger.error(f"Error in _check_and_close_initial_order: {e}")
 
@@ -2079,19 +2109,21 @@ class MoveGuard(Strategy):
             # Get active orders for this cycle
             active_orders = [o for o in cycle.orders if o.get('status') == 'active']
             active_grid_orders = [o for o in active_orders if o.get('is_grid', False)]
-            if not active_grid_orders:
-                logger.debug(f"📊 No active orders found for cycle {cycle.cycle_id}, starting at level 1")
-                return 0
             
-            # Find the highest grid level among active orders
-            max_grid_level = 0
+            if not active_grid_orders:
+                logger.debug(f"📊 No active grid orders found for cycle {cycle.cycle_id}, starting at level 1")
+                return 1
+            
+            # Find the highest grid level among active grid orders
+            max_grid_level = -1
             for order in active_grid_orders:
                 grid_level = order.get('grid_level', 0)
                 if grid_level > max_grid_level:
                     max_grid_level = grid_level
             
-        
-            return max_grid_level+1
+            next_level = max_grid_level + 1
+            logger.debug(f"📊 Grid level calculation for cycle {cycle.cycle_id}: max_level={max_grid_level}, next_level={next_level}")
+            return next_level
             
         except Exception as e:
             logger.error(f"❌ Error calculating grid level for MoveGuard: {str(e)}")
@@ -2105,20 +2137,15 @@ class MoveGuard(Strategy):
             # Get all active orders for this cycle
             active_orders = [o for o in cycle.orders if o.get('status') == 'active']
             
-            # Reset grid levels starting from 1
-            new_level = 1
+            # Reset grid levels starting from 0
+            new_level = 0
             for order in active_orders:
-                if order.get('is_grid', False):  # Only reset grid orders, not initial orders
+                if order.get('is_grid', False):  # Reset all grid orders including grid_0
                     old_level = order.get('grid_level', 0)
                     order['grid_level'] = new_level
                     order['order_type'] = f'grid_{new_level}'
                     logger.debug(f"📊 Reset order {order.get('order_id')} from level {old_level} to {new_level}")
                     new_level += 1
-                else:
-                    # Keep initial orders at level 0
-                    order['grid_level'] = 0
-                    order['order_type'] = 'initial'
-                    logger.debug(f"📊 Kept initial order {order.get('order_id')} at level 0")
             
             logger.info(f"✅ Grid levels reset for cycle {cycle.cycle_id}: {len(active_orders)} orders updated")
             
@@ -3501,24 +3528,38 @@ class MoveGuard(Strategy):
                 position = positions[0]
                 comment = getattr(position, 'comment', '')
                 
+                logger.debug(f"📊 Checking MT5 comment for order {order_id}: '{comment}'")
+                
                 # Update order_type based on comment
-                if 'MoveGuard_Initial' in comment:
-                    order['order_type'] = 'initial'
+                if 'MoveGuard_Grid_0' in comment:
+                    old_type = order.get('order_type', 'unknown')
+                    order['order_type'] = 'grid_0'
                     order['is_initial'] = True
+                    order['is_grid'] = True
+                    order['grid_level'] = 0
+                    logger.debug(f"📊 Updated order {order_id} type: {old_type} → grid_0 (from MT5 comment)")
                     return True
                 elif 'MoveGuard_Grid_' in comment:
                     # Extract grid level from comment
                     try:
                         grid_level = int(comment.split('MoveGuard_Grid_')[1])
+                        old_type = order.get('order_type', 'unknown')
                         order['order_type'] = f'grid_{grid_level}'
                         order['grid_level'] = grid_level
                         order['is_grid'] = True
+                        order['is_initial'] = False
+                        logger.debug(f"📊 Updated order {order_id} type: {old_type} → grid_{grid_level} (from MT5 comment)")
                         return True
                     except (IndexError, ValueError):
                         # Fallback to generic grid
+                        old_type = order.get('order_type', 'unknown')
                         order['order_type'] = 'grid'
                         order['is_grid'] = True
+                        order['is_initial'] = False
+                        logger.debug(f"📊 Updated order {order_id} type: {old_type} → grid (fallback from MT5 comment)")
                         return True
+                else:
+                    logger.debug(f"📊 No MoveGuard comment found for order {order_id}: '{comment}'")
             
             return False
             
@@ -3543,6 +3584,25 @@ class MoveGuard(Strategy):
             
         except Exception as e:
             logger.error(f"❌ Error fixing order types in cycle: {str(e)}")
+            return 0
+
+    def _ensure_order_types_from_mt5_comments(self, cycle):
+        """Ensure all order types are correctly set from MT5 comments before any processing"""
+        try:
+            updated_count = 0
+            for order in cycle.orders:
+                if order.get('status') == 'active':
+                    # Always try to update from MT5 comment first
+                    if self._update_order_type_from_mt5_comment(order):
+                        updated_count += 1
+            
+            if updated_count > 0:
+                logger.info(f"📊 Updated {updated_count} order types from MT5 comments for cycle {cycle.cycle_id}")
+            
+            return updated_count
+            
+        except Exception as e:
+            logger.error(f"❌ Error ensuring order types from MT5 comments: {str(e)}")
             return 0
 
     def _fix_missing_grid_levels_in_cycle(self, cycle):
@@ -3583,7 +3643,7 @@ class MoveGuard(Strategy):
                 if active_orders:
                     initial_order = None
                     for order in active_orders:
-                        if order.get('is_initial') or order.get('order_type') == 'initial':
+                        if order.get('is_initial') or 'grid_0' in order.get('order_type', '').lower() or 'initial' in order.get('order_type', '').lower():
                             initial_order = order
                             break
                     

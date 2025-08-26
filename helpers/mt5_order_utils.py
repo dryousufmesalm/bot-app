@@ -284,16 +284,16 @@ class MT5OrderUtils:
             dict: Order data in MoveGuard format
         """
         try:
-            # Preserve existing grid level if present, otherwise set to -1 for initial orders
+            # Preserve existing grid level if present, otherwise set to 0 for grid_0 orders
             existing_grid_level = order_data.get('grid_level')
             if existing_grid_level is not None:
                 grid_level = existing_grid_level
                 is_initial = False
-                order_type = f'grid_{grid_level}' if grid_level > 0 else 'initial'
+                order_type = f'grid_{grid_level}' if grid_level >= 0 else 'grid_0'
             else:
-                grid_level = -1  # -1 indicates initial order (not a grid order)
+                grid_level = 0  # 0 indicates grid_0 order (cycle entry)
                 is_initial = True
-                order_type = 'initial'
+                order_type = 'grid_0'
             
             # Convert MT5OrderUtils format to MoveGuard format
             moveguard_order = {
