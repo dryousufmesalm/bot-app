@@ -38,6 +38,7 @@ class Account:
         self.ah_repo = AHRepo(engine=engine)
         self.ct_repo = CTRepo(engine=engine)
         self.processed_events = set()  # Track processed events to prevent duplicates
+        self.bot_processed_events = {}  # Track processed events per bot
 
     async def on_init(self):
         """ Initialize the account """
@@ -228,6 +229,11 @@ class Account:
                 for bot in self.bots:
                     if bot.id == bot_id:
                         self.bots.remove(bot)
+                        # Clean up bot-specific processed events
+                        if bot_id in self.bot_processed_events:
+                            del self.bot_processed_events[bot_id]
+                            logger.info(f"🧹 Cleaned up processed events for deleted bot {bot_id}")
+                        
                         self.client.delete_event(event.id)
                         data = {
                             "title":    bot.name,
@@ -240,17 +246,9 @@ class Account:
                         self.client.send_log(data)
                         break
             else:
-                logger.info(message)
-                # Delete event BEFORE processing to prevent duplicate processing
-                try:
-                    self.client.delete_event(event.id)
-                    logger.info(f"Event {event.id} deleted before processing")
-                except Exception as e:
-                    logger.error(f"Failed to delete event {event.id}: {e}")
-                    # If we can't delete the event, don't process it to avoid duplicates
-                    return
+                logger.info(f"📨 Processing event: {message}")
                 
-                # Now safely process the event
+                # Event is already deleted in the subscribe method, so just process it
                 await self.route_event_to_bot(event, bot_id)
         except Exception as e:
             logger.error(f"Failed to handle event: {e}")
@@ -260,24 +258,80 @@ class Account:
         event_cleanup_counter = 0
         while True:
             try:
-                events = self.client.get_all_events()
-                if len(events) > 0:
-                    tasks = []
-                    for event in events:
-                        if event.account == self.id:
-                            tasks.append(asyncio.create_task(
+                # Get events for each bot individually to prevent race conditions
+                bot_events_processed = 0
+                
+                for bot in self.bots:
+                    try:
+                        # Get events specific to this bot
+                        bot_events = self.client.get_events_by_account_and_bot(self.id, bot.id)
+                        if bot_events and len(bot_events) > 0:
+                            logger.info(f"📨 Processing {len(bot_events)} events for bot {bot.id}")
+                            
+                            # Process events for this bot
+                            for event in bot_events:
+                                try:
+                                    # Check if this bot has already processed this event
+                                    if bot.id not in self.bot_processed_events:
+                                        self.bot_processed_events[bot.id] = set()
+                                    
+                                    if event.id in self.bot_processed_events[bot.id]:
+                                        logger.info(f"⏭️ Bot {bot.id} already processed event {event.id}, skipping")
+                                        continue
+                                    
+                                    # Delete event immediately to prevent other bots from seeing it
+                                    self.client.delete_event(event.id)
+                                    logger.info(f"🗑️ Deleted event {event.id} for bot {bot.id}")
+                                    
+                                    # Mark event as processed for this bot
+                                    self.bot_processed_events[bot.id].add(event.id)
+                                    
+                                    # Process the event
+                                    await self.handle_events(event)
+                                    bot_events_processed += 1
+                                    
+                                except Exception as e:
+                                    logger.error(f"❌ Error processing event {event.id} for bot {bot.id}: {e}")
+                                    # Remove from processed events so it can be retried
+                                    if bot.id in self.bot_processed_events and event.id in self.bot_processed_events[bot.id]:
+                                        self.bot_processed_events[bot.id].remove(event.id)
+                                    
+                    except Exception as e:
+                        logger.error(f"❌ Error processing events for bot {bot.id}: {e}")
+                
+                # Also check for account-level events (create_bot, update_bot, delete_bot)
+                account_events = self.client.get_all_events()
+                if account_events and len(account_events) > 0:
+                    account_tasks = []
+                    for event in account_events:
+                        if event.account == self.id and not hasattr(event, 'bot'):
+                            # This is an account-level event (no specific bot)
+                            account_tasks.append(asyncio.create_task(
                                 self.handle_events(event)))
-                    if len(tasks) > 0:
-                        await asyncio.gather(*tasks)
+                    
+                    if len(account_tasks) > 0:
+                        await asyncio.gather(*account_tasks)
+                        logger.info(f"📨 Processed {len(account_tasks)} account-level events")
+                
+                if bot_events_processed > 0:
+                    logger.info(f"✅ Processed {bot_events_processed} bot-specific events")
                 
                 # Clean up processed events every 100 iterations to prevent memory leaks
                 event_cleanup_counter += 1
                 if event_cleanup_counter >= 100:
-                    # Keep only the last 1000 processed event IDs
+                    # Keep only the last 1000 processed event IDs for account-level events
                     if len(self.processed_events) > 1000:
                         events_list = list(self.processed_events)
                         self.processed_events = set(events_list[-1000:])
-                        logger.info(f"Cleaned up processed events cache, kept {len(self.processed_events)} entries")
+                        logger.info(f"Cleaned up account processed events cache, kept {len(self.processed_events)} entries")
+                    
+                    # Clean up bot-specific processed events
+                    for bot_id, bot_events in self.bot_processed_events.items():
+                        if len(bot_events) > 1000:
+                            events_list = list(bot_events)
+                            self.bot_processed_events[bot_id] = set(events_list[-1000:])
+                            logger.info(f"Cleaned up bot {bot_id} processed events cache, kept {len(self.bot_processed_events[bot_id])} entries")
+                    
                     event_cleanup_counter = 0
                     
             except (ConnectionError, TimeoutError) as e:

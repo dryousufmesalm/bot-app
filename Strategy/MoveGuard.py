@@ -1478,7 +1478,8 @@ class MoveGuard(Strategy):
                 if upper == 0.0 or lower == 0.0:
                     upper, lower = self._calculate_proper_boundaries(cycle, current_price)
                 pip_value = self._get_pip_value()
-                initial_offset = self.entry_interval_pips * pip_value
+                entry_interval_pips = getattr(cycle, 'entry_interval_pips', self.entry_interval_pips)
+                initial_offset = entry_interval_pips * pip_value
 
                 active_order_count = len([o for o in getattr(cycle, 'orders', []) if o.get('status') == 'active'])
                 
@@ -1501,8 +1502,10 @@ class MoveGuard(Strategy):
                     if current_price >= (upper + initial_offset):
                         cycle.direction = 'BUY'
                         cycle.was_above_upper = True
-                        logger.info(f"🎯 MoveGuard placing first BUY order - price {current_price} >= upper+offset {upper + initial_offset}")
-                        self._place_initial_order(cycle, 'BUY', current_price)
+                        # Calculate grid start price for BUY orders
+                        grid_start_price = upper + (entry_interval_pips * pip_value)
+                        logger.info(f"🎯 MoveGuard placing first BUY order - price {current_price} >= upper+offset {upper + initial_offset}, placing at grid_start_price {grid_start_price}")
+                        self._place_initial_order(cycle, 'BUY', grid_start_price)
                         cycle.lower_bound = upper-self.zone_threshold_pips * pip_value
                         lower= cycle.lower_bound
                         #update zone data
@@ -1512,8 +1515,10 @@ class MoveGuard(Strategy):
                     elif current_price <= (lower - initial_offset):
                         cycle.direction = 'SELL'
                         cycle.was_below_lower = True
-                        logger.info(f"🎯 MoveGuard placing first SELL order - price {current_price} <= lower-offset {lower - initial_offset}")
-                        self._place_initial_order(cycle, 'SELL', current_price)
+                        # Calculate grid start price for SELL orders
+                        grid_start_price = lower - (entry_interval_pips * pip_value)
+                        logger.info(f"🎯 MoveGuard placing first SELL order - price {current_price} <= lower-offset {lower - initial_offset}, placing at grid_start_price {grid_start_price}")
+                        self._place_initial_order(cycle, 'SELL', grid_start_price)
                         cycle.upper_bound = lower+self.zone_threshold_pips * pip_value
                         upper= cycle.upper_bound
                         #update zone data   
@@ -1572,19 +1577,19 @@ class MoveGuard(Strategy):
             logger.error(f"❌ Error processing grid logic: {str(e)}")
             logger.error(traceback.format_exc())
 
-    def _place_initial_order(self, cycle, direction: str, current_price: float) -> bool:
-        """Place the first order with initial SL only, per new rules."""
+    def _place_initial_order(self, cycle, direction: str, order_price: float) -> bool:
+        """Place the first order (grid_0) at the calculated grid start price with initial SL only."""
         try:
             pip_value = self._get_pip_value()
             sl_price = 0.0
             tp_price = 0.0
             if direction == 'BUY':
                 if self.initial_stop_loss_pips > 0:
-                    sl_price = round(current_price - (self.initial_stop_loss_pips * pip_value), 2)
+                    sl_price = round(order_price - (self.initial_stop_loss_pips * pip_value), 2)
                 result = self.meta_trader.place_buy_order(
                     symbol=self.symbol,
                     volume=self.lot_size,
-                    price=current_price,
+                    price=order_price,
                     stop_loss=sl_price,
                     take_profit=0.0,
                     comment="MoveGuard_Grid_0"
@@ -1592,11 +1597,11 @@ class MoveGuard(Strategy):
                 order_direction = 'BUY'
             else:
                 if self.initial_stop_loss_pips > 0:
-                    sl_price = round(current_price + (self.initial_stop_loss_pips * pip_value), 2)
+                    sl_price = round(order_price + (self.initial_stop_loss_pips * pip_value), 2)
                 result = self.meta_trader.place_sell_order(
                     symbol=self.symbol,
                     volume=self.lot_size,
-                    price=current_price,
+                    price=order_price,
                     stop_loss=sl_price,
                     take_profit=0.0,
                     comment="MoveGuard_Grid_0"
@@ -1612,7 +1617,7 @@ class MoveGuard(Strategy):
                     'order_id': result['order'].get('ticket'),
                     'ticket': result['order'].get('ticket'),
                     'direction': order_direction,
-                    'price': current_price,
+                    'price': order_price,
                     'lot_size': self.lot_size,
                     'is_initial': True,
                     'order_type': 'grid_0',
@@ -1638,14 +1643,14 @@ class MoveGuard(Strategy):
                     cycle.grid_data = {
                         'current_level': 0,
                         'grid_direction': direction,
-                        'last_grid_price': current_price,
+                        'last_grid_price': order_price,
                         'grid_orders': []
                     }
                 # Add grid_0 order to grid_orders list since it's part of the grid system
                 cycle.grid_data['grid_orders'].append(order_info)
                 
                 # Initialize trailing stop-loss for both BUY and SELL orders
-                self._update_trailing_stop_loss(cycle, current_price)
+                self._update_trailing_stop_loss(cycle, order_price)
                 
                 return True
             else:
@@ -4009,22 +4014,36 @@ class MoveGuard(Strategy):
             if not hasattr(self, 'last_cycle_price'):
                 self.last_cycle_price = self._get_last_cycle_price()
                 return
-            
-            # Check if we can create more cycles (respect max_active_cycles limit)
-            active_cycles = self.multi_cycle_manager.get_all_active_cycles()
-            if len(active_cycles) >= self.max_active_cycles:
-                logger.info(f"🎯 Max active cycles ({self.max_active_cycles}) reached, skipping interval cycle creation. Current active cycles: {len(active_cycles)}")
-                return
-            
-            if not self.auto_place_cycles:
-                logger.debug("Auto place cycles is disabled, skipping interval cycle creation")
-                return
-            
             # Calculate the current price level
             next_up_level, next_down_level = self._calculate_price_level()
             current_level = next_up_level if current_price > self.last_cycle_price else next_down_level
             direction = "BUY" if current_price > self.last_cycle_price else "SELL"
             
+            
+            
+            # Check if we can create more cycles (respect max_active_cycles limit)
+            active_cycles = self.multi_cycle_manager.get_all_active_cycles()
+            if len(active_cycles) >= self.max_active_cycles:
+                logger.info(f"🎯 Max active cycles ({self.max_active_cycles}) reached, skipping interval cycle creation. Current active cycles: {len(active_cycles)}")
+                if direction == "BUY" and current_level > self.meta_trader.get_ask(self.symbol):
+                    return
+                if direction == "SELL" and current_level < self.meta_trader.get_bid(self.symbol):
+                    return
+                # Update last cycle price
+                self.last_cycle_price = current_level
+
+                return
+            
+            if not self.auto_place_cycles:
+                logger.debug("Auto place cycles is disabled, skipping interval cycle creation")
+                # Check if we should create a cycle at this level
+                if direction == "BUY" and current_level > self.meta_trader.get_ask(self.symbol):
+                    return 
+                if direction == "SELL" and current_level < self.meta_trader.get_bid(self.symbol):
+                    return 
+                # Update last cycle price
+                self.last_cycle_price = current_price
+                return
             # Check if we already have a cycle at this level
             existing_cycles = self._get_cycles_at_level(current_level, direction)
             if not existing_cycles:

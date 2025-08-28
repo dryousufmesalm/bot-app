@@ -193,6 +193,22 @@ class API:
             logging.error(f"An error occurred while fetching events: {e}")
             return None
 
+    def get_events_by_bot(self, bot_id: str):
+        """Get events specific to a bot."""
+        try:
+            return self.client.collection("events").get_full_list(200, {"filter": f"bot = '{bot_id}'"})
+        except Exception as e:
+            logging.error(f"An error occurred while fetching events for bot {bot_id}: {e}")
+            return None
+
+    def get_events_by_account_and_bot(self, account_id: str, bot_id: str):
+        """Get events specific to an account and bot combination."""
+        try:
+            return self.client.collection("events").get_full_list(200, {"filter": f"account = '{account_id}' && bot = '{bot_id}'"})
+        except Exception as e:
+            logging.error(f"An error occurred while fetching events for account {account_id} and bot {bot_id}: {e}")
+            return None
+
     def get_symbol_by_id(self, symbol_id):
         """Get a symbol by its ID."""
         try:
