@@ -209,6 +209,9 @@ class MoveGuard(Strategy):
         self.recovery_cycles = {}
         self.recovery_direction_locks = {}
         
+        # Cycle level tracking to prevent duplicates
+        self.active_cycle_levels = set()  # Track active cycle levels
+        
         logger.info("✅ MoveGuard trading state initialized")
 
     def _initialize_loss_tracker(self):
@@ -2786,6 +2789,9 @@ class MoveGuard(Strategy):
             except Exception as rm_err:
                 logger.warning(f"Could not remove cycle {cycle.cycle_id} from manager: {rm_err}")
             
+            # Remove level from active cycle levels tracking
+            self._remove_cycle_level(cycle.entry_price)
+            
             logger.info(f"✅ MoveGuard cycle {cycle.cycle_id} closed on take profit: ${cycle.total_profit_dollars:.2f} ({cycle.total_profit_pips:.2f} pips)")
             
         except Exception as e:
@@ -2991,6 +2997,9 @@ class MoveGuard(Strategy):
                     
                     # Remove cycle from active cycles list
                     self.multi_cycle_manager.remove_cycle(cycle.cycle_id)
+                    
+                    # Remove level from active cycle levels tracking
+                    self._remove_cycle_level(cycle.entry_price)
                     
                     logger.info(f"✅ MoveGuard cycle {cid} closed successfully and removed from active list")
                     any_success = True
@@ -3996,15 +4005,68 @@ class MoveGuard(Strategy):
             cycles_at_level = []
             active_cycles = self.multi_cycle_manager.get_all_active_cycles()
             
+            # Use a more appropriate tolerance based on the symbol's pip value
+            pip_value = self._get_pip_value()
+            tolerance = pip_value * 0.1  # 10% of pip value as tolerance
+            
             for cycle in active_cycles:
-                if abs(cycle.entry_price - price_level) < 0.0001:  # Compare stored level directly
+                # Check if cycle is at the same price level with appropriate tolerance
+                if abs(cycle.entry_price - price_level) <= tolerance:
                     if direction is None or cycle.direction == direction:
                         cycles_at_level.append(cycle)
+                        logger.debug(f"Found cycle {cycle.cycle_id} at level {price_level} (entry_price: {cycle.entry_price}, tolerance: {tolerance})")
             
             return cycles_at_level
         except Exception as e:
             logger.error(f"❌ Error getting cycles at level: {str(e)}")
             return []
+
+    def _has_cycle_at_level(self, price_level, direction=None):
+        """Check if there's already a cycle at the specified price level"""
+        try:
+            cycles_at_level = self._get_cycles_at_level(price_level, direction)
+            return len(cycles_at_level) > 0
+        except Exception as e:
+            logger.error(f"❌ Error checking for cycles at level: {str(e)}")
+            return False
+
+    def _get_cycle_level_key(self, price_level):
+        """Get a standardized level key for cycle tracking"""
+        try:
+            # Round to 2 decimal places for consistent level comparison
+            # This ensures that small floating point differences don't create separate levels
+            return round(price_level, 2)
+        except Exception as e:
+            logger.error(f"❌ Error creating level key: {str(e)}")
+            return price_level
+
+    def _add_cycle_level(self, price_level):
+        """Add a price level to the active cycle levels tracking"""
+        try:
+            level_key = self._get_cycle_level_key(price_level)
+            self.active_cycle_levels.add(level_key)
+            logger.debug(f"✅ Added level {level_key} to active cycle levels tracking")
+        except Exception as e:
+            logger.error(f"❌ Error adding cycle level: {str(e)}")
+
+    def _remove_cycle_level(self, price_level):
+        """Remove a price level from the active cycle levels tracking"""
+        try:
+            level_key = self._get_cycle_level_key(price_level)
+            if level_key in self.active_cycle_levels:
+                self.active_cycle_levels.remove(level_key)
+                logger.debug(f"🗑️ Removed level {level_key} from active cycle levels tracking")
+        except Exception as e:
+            logger.error(f"❌ Error removing cycle level: {str(e)}")
+
+    def _is_level_active(self, price_level):
+        """Check if a price level is already active (has a cycle)"""
+        try:
+            level_key = self._get_cycle_level_key(price_level)
+            return level_key in self.active_cycle_levels
+        except Exception as e:
+            logger.error(f"❌ Error checking if level is active: {str(e)}")
+            return False
 
     async def _check_cycle_intervals(self, current_price):
         """Check and create cycles at defined intervals"""
@@ -4044,34 +4106,47 @@ class MoveGuard(Strategy):
                 # Update last cycle price
                 self.last_cycle_price = current_price
                 return
-            # Check if we already have a cycle at this level
-            existing_cycles = self._get_cycles_at_level(current_level, direction)
-            if not existing_cycles:
+            
+            # Check if we already have a cycle at this level using improved method
+            has_existing_cycle = self._has_cycle_at_level(current_level, direction)
+            is_level_active = self._is_level_active(current_level)
+            
+            if not has_existing_cycle and not is_level_active:
+                logger.info(f"🔄 No existing cycle found at level {current_level} for {direction} direction - creating new cycle")
                 # Create new cycle with initial order
-                await self._create_interval_cycle_sync(direction, current_level)
+                success = await self._create_interval_cycle_sync(direction, current_level)
+                if success:
+                    # Add level to active tracking
+                    self._add_cycle_level(current_level)
+            else:
+                logger.debug(f"🔄 Cycle already exists at level {current_level} for {direction} direction - skipping creation")
+                # Update last_cycle_price to prevent getting stuck
+                self.last_cycle_price = current_level
                 
         except Exception as e:
             logger.error(f"❌ Error checking cycle intervals: {str(e)}")
             logger.error(traceback.format_exc())
 
-    async def _create_interval_cycle_sync(self, direction: str, price: float):
+    async def _create_interval_cycle_sync(self, direction: str, price: float) -> bool:
         """Create a new cycle with initial order based on price movement"""
         try:
             # Check if we should create a cycle at this level
             if direction == "BUY" and price > self.meta_trader.get_ask(self.symbol):
-                return  # Don't create BUY cycles below current price
+                logger.debug(f"🔄 Skipping BUY cycle creation at {price} - price too high")
+                return False  # Don't create BUY cycles below current price
             if direction == "SELL" and price < self.meta_trader.get_bid(self.symbol):
-                return  # Don't create SELL cycles above current price
+                logger.debug(f"🔄 Skipping SELL cycle creation at {price} - price too low")
+                return False  # Don't create SELL cycles above current price
             
             # Double-check if we can create more cycles (safety check)
             active_cycles = self.multi_cycle_manager.get_all_active_cycles()
             if len(active_cycles) >= self.max_active_cycles:
                 logger.warning(f"Cannot create new cycle: max cycles ({self.max_active_cycles}) reached")
-                return
+                return False
                 
         except Exception as e:
             logger.error(f"❌ Error creating interval cycle: {str(e)}")
-            return
+            return False
 
         # Create order parameters for the interval cycle
         order_params = {
@@ -4096,12 +4171,14 @@ class MoveGuard(Strategy):
                 # Update last cycle price
                 self.last_cycle_price = price
                 logger.info(f"✅ Interval cycle created successfully for {direction} at {price}")
+                return True
             else:
                 logger.error(f"❌ Failed to create interval cycle for {direction} at {price}")
+                return False
                 
         except Exception as order_error:
             logger.error(f"❌ Exception during {direction} order placement for interval cycle: {order_error}")
-            return
+            return False
 
     def _get_last_cycle_price(self):
         """Get the last cycle price from the database and set it as the last cycle price"""
