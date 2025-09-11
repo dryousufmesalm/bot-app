@@ -390,10 +390,18 @@ class Account:
                     
                     # Only update if we got a valid price
                     if bid_price is not None:
-                        symbol_data = {
-                            "price": bid_price,
-                        }
-                        self.client.update_symbol(bot.symbol, symbol_data)
+                        # Find the symbol record by name first
+                        symbol_records = self.client.get_symbol_by_name(bot.symbol_name, self.id)
+                        
+                        if symbol_records and len(symbol_records) > 0:
+                            symbol_record = symbol_records[0]
+                            symbol_data = {
+                                "price": bid_price,
+                            }
+                            # Update using the actual symbol ID from the database
+                            self.client.update_symbol(symbol_record.id, symbol_data)
+                        else:
+                            logger.debug(f"Symbol '{bot.symbol_name}' not found in database for account {self.id}")
                     else:
                         logger.debug(f"Skipping price update for {bot.symbol_name} - no valid bid price available")
                         

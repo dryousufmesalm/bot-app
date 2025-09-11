@@ -168,6 +168,9 @@ class MoveGuardCycle(cycle):
             self.cycle_type = cycle_data.get('cycle_type', 'MoveGuard')
             self.magic_number = int(cycle_data.get('magic_number', 0))
             
+            # Cycle-specific configuration
+            self.cycle_config = self._parse_json_field(cycle_data.get('cycle_config'), {})
+            
             # Trailing stop-loss and price tracking fields
             self.trailing_stop_loss = float(cycle_data.get('trailing_stop_loss', 0.0))
             self.highest_buy_price = float(cycle_data.get('highest_buy_price', 0.0))
@@ -209,6 +212,9 @@ class MoveGuardCycle(cycle):
         self.orders_config = {}
         self.cycle_type = 'MoveGuard'
         self.magic_number = 0
+        
+        # Cycle-specific configuration
+        self.cycle_config = {}
         
         # Price levels
         self.entry_price = 0.0
@@ -951,3 +957,84 @@ class MoveGuardCycle(cycle):
             
         except Exception as e:
             logger.error(f"Error debugging cycle status: {e}")
+
+    # ==================== CYCLE CONFIGURATION MANAGEMENT ====================
+
+    def get_cycle_config_value(self, config_key, default_value=None):
+        """Get configuration value from cycle-specific config"""
+        try:
+            if not hasattr(self, 'cycle_config') or not self.cycle_config:
+                logger.debug(f"📋 No cycle config available for {config_key}, using default: {default_value}")
+                return default_value
+            
+            # Parse JSON if it's a string
+            cycle_config = self.cycle_config
+            if isinstance(cycle_config, str):
+                try:
+                    cycle_config = json.loads(cycle_config)
+                except json.JSONDecodeError:
+                    logger.warning(f"⚠️ Invalid JSON in cycle_config for {self.cycle_id}")
+                    return default_value
+            
+            if config_key in cycle_config:
+                value = cycle_config[config_key]
+                logger.debug(f"📋 Using cycle-specific config for {config_key}: {value}")
+                return value
+            else:
+                logger.debug(f"📋 Config key {config_key} not found in cycle config, using default: {default_value}")
+                return default_value
+                
+        except Exception as e:
+            logger.error(f"❌ Error getting cycle config value for {config_key}: {str(e)}")
+            return default_value
+
+    def has_cycle_config(self):
+        """Check if cycle has specific configuration"""
+        try:
+            if not hasattr(self, 'cycle_config') or not self.cycle_config:
+                return False
+            
+            # Parse JSON if it's a string
+            cycle_config = self.cycle_config
+            if isinstance(cycle_config, str):
+                try:
+                    cycle_config = json.loads(cycle_config)
+                except json.JSONDecodeError:
+                    return False
+            
+            return len(cycle_config) > 0
+            
+        except Exception as e:
+            logger.error(f"❌ Error checking cycle config: {str(e)}")
+            return False
+
+    def get_cycle_config_summary(self):
+        """Get a summary of cycle-specific configuration"""
+        try:
+            if not self.has_cycle_config():
+                return "No cycle-specific configuration"
+            
+            # Parse JSON if it's a string
+            cycle_config = self.cycle_config
+            if isinstance(cycle_config, str):
+                try:
+                    cycle_config = json.loads(cycle_config)
+                except json.JSONDecodeError:
+                    return "Invalid cycle configuration"
+            
+            # Get key configuration values
+            summary = {
+                'config_saved_at': cycle_config.get('config_saved_at', 'Unknown'),
+                'config_version': cycle_config.get('config_version', 'Unknown'),
+                'lot_size': cycle_config.get('lot_size', 'Default'),
+                'grid_interval_pips': cycle_config.get('grid_interval_pips', 'Default'),
+                'zone_threshold_pips': cycle_config.get('zone_threshold_pips', 'Default'),
+                'max_trades_per_cycle': cycle_config.get('max_trades_per_cycle', 'Default'),
+                'zone_movement_mode': cycle_config.get('zone_movement_mode', 'Default')
+            }
+            
+            return summary
+            
+        except Exception as e:
+            logger.error(f"❌ Error getting cycle config summary: {str(e)}")
+            return "Error retrieving configuration summary"

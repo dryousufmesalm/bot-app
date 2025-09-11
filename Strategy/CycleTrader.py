@@ -195,12 +195,33 @@ class CycleTrader(Strategy):
                 self.settings = settings
 
             self.init_settings()
+            
+            # Update magic number in PocketBase if it has changed
+            self._update_magic_number_if_needed(config)
+            
             logger.info(f"CycleTrader configs updated for {self.symbol}")
         except Exception as e:
             logger.error(f"Error updating CycleTrader configs: {e}")
             # Ensure critical parameters have default values if update fails
             if not hasattr(self, 'zone_forward2') or self.zone_forward2 is None:
                 self.zone_forward2 = 1
+
+    def _update_magic_number_if_needed(self, cfg):
+        """Update magic number in PocketBase if it has changed"""
+        try:
+            if 'magic_number' in cfg and cfg['magic_number'] != self.bot.magic:
+                # Update magic number in PocketBase
+                if hasattr(self.client, 'update_bot_magic_number'):
+                    result = self.client.update_bot_magic_number(self.bot.id, cfg['magic_number'])
+                    if result:
+                        self.bot.magic = cfg['magic_number']
+                        logger.info(f"✅ Magic number updated to {cfg['magic_number']} in PocketBase")
+                    else:
+                        logger.error(f"❌ Failed to update magic number in PocketBase")
+                else:
+                    logger.warning(f"⚠️ Client does not support update_bot_magic_number method")
+        except Exception as e:
+            logger.error(f"❌ Error updating magic number: {str(e)}")
 
     async def handle_event(self, event):
         """

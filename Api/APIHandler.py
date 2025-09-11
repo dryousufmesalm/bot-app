@@ -233,6 +233,14 @@ class API:
             logging.error(f"Failed to get symbol: {e}")
             return None
 
+    def get_symbol_by_name(self, symbol_name, account_id):
+        """Get a symbol by its name and account."""
+        try:
+            return self.client.collection("symbols").get_full_list(200, {"filter": f"name = '{symbol_name}' && account = '{account_id}'"})
+        except Exception as e:
+            logging.error(f"Failed to get symbol by name: {e}")
+            return None
+
     def create_symbol(self, data):
         """Create a symbol."""
         try:
@@ -393,6 +401,17 @@ class API:
             return self.client.collection("bots").update(bot_id, data)
         except Exception as e:
             logging.error(f"Failed to set bot as running: {e}")
+            return None
+
+    def update_bot_magic_number(self, bot_id, magic_number):
+        """Update a bot's magic number."""
+        try:
+            data = {"magic_number": magic_number}
+            result = self.client.collection("bots").update(bot_id, data)
+            logging.info(f"✅ Successfully updated magic number for bot {bot_id} to {magic_number}")
+            return result
+        except Exception as e:
+            logging.error(f"❌ Failed to update magic number for bot {bot_id}: {e}")
             return None
 
     def send_log(self, data):

@@ -30,3 +30,23 @@ class StockTrader(Strategy):
         """
         self.config = config
         self.init_settings()
+        
+        # Update magic number in PocketBase if it has changed
+        self._update_magic_number_if_needed(config)
+
+    def _update_magic_number_if_needed(self, cfg):
+        """Update magic number in PocketBase if it has changed"""
+        try:
+            if 'magic_number' in cfg and hasattr(self, 'bot') and cfg['magic_number'] != self.bot.magic:
+                # Update magic number in PocketBase
+                if hasattr(self.client, 'update_bot_magic_number'):
+                    result = self.client.update_bot_magic_number(self.bot.id, cfg['magic_number'])
+                    if result:
+                        self.bot.magic = cfg['magic_number']
+                        print(f"✅ Magic number updated to {cfg['magic_number']} in PocketBase")
+                    else:
+                        print(f"❌ Failed to update magic number in PocketBase")
+                else:
+                    print(f"⚠️ Client does not support update_bot_magic_number method")
+        except Exception as e:
+            print(f"❌ Error updating magic number: {str(e)}")

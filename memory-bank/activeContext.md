@@ -1,52 +1,78 @@
 # Active Context - Current Focus
 
-## 🎯 CURRENT STATUS: MoveGuard Recovery Direction Field Error FIXED ✅
+## 🎯 CURRENT STATUS: MoveGuard Comprehensive Cycle-Specific Configuration IMPLEMENTED ✅
 
-### **Latest Achievement: Critical Bug Fix Completed**
-- **Issue**: `'Record' object has no attribute 'recovery_direction'` error in MoveGuard strategy
-- **Status**: ✅ FIXED - Schema-compliant field access implemented
+### **Latest Achievement: Complete Configuration Isolation Completed**
+- **Issue**: All configuration values were using strategy-level config instead of cycle-specific config
+- **Status**: ✅ COMPLETE - All configuration values now use cycle-specific settings
 - **Date**: 2025-01-27
-- **Impact**: MoveGuard cycle synchronization now working correctly
+- **Impact**: Complete configuration isolation achieved, proper configuration versioning ensured
 
-### **Problem Resolution Summary**
-📌 **Root Cause**: The `moveguard_cycles` collection schema doesn't have a `recovery_direction` field. Recovery data is stored in the `recovery_data` JSON field instead.
+### **Comprehensive Enhancement Summary**
+📌 **Problem**: MoveGuard strategy was using strategy-level configuration values instead of cycle-specific configuration values:
+- **Order Placement**: Using `self.lot_size` instead of cycle-specific lot size
+- **Stop Loss**: Using `self.initial_stop_loss_pips` instead of cycle-specific values
+- **Take Profit**: Using `self.cycle_take_profit_pips` instead of cycle-specific values
+- **Recovery Logic**: Using `self.recovery_stop_loss_pips` instead of cycle-specific values
+- **Cycle Management**: Using `self.max_active_cycles` instead of cycle-specific values
+- **Zone Configuration**: Using `self.zone_threshold_pips` instead of cycle-specific values
+- **Grid Configuration**: Using `self.entry_interval_pips` instead of cycle-specific values
 
 🛠️ **Solution Implemented**: 
-- Updated `_convert_pb_cycle_to_local_format()` method to extract recovery data from JSON fields
-- Replaced direct field access with proper JSON field extraction from `recovery_data` and `zone_data`
-- Added comprehensive JSON parsing with fallback values for malformed data
-- Made code compliant with actual PocketBase schema structure
+- **Complete Configuration Isolation**: All configuration values now use cycle-specific settings
+- **Order Placement Configuration**: Updated all order placement methods to use cycle-specific lot size and stop loss
+- **Recovery Logic Configuration**: Updated recovery logic to use cycle-specific thresholds and intervals
+- **Take Profit Configuration**: Updated take profit calculations to use cycle-specific targets
+- **Cycle Management Configuration**: Updated max cycles logic to use cycle-specific limits
+- **Configuration Versioning**: Each cycle now uses its own preserved configuration from creation time
+- **Proper Isolation**: Configuration changes only affect new cycles, not existing ones
 
-### **Schema Analysis Results** ✅
-- **PocketBase MCP Check Complete**: Confirmed `moveguard_cycles` collection schema
-- **Field Verification**: `recovery_direction` field does NOT exist in `moveguard_cycles` collection
-- **Correct Structure**: Recovery data is stored in `recovery_data` JSON field
-- **Available Fields**: `recovery_data`, `grid_data`, `zone_data`, `zone_movement_history` (all JSON fields)
+### **Implementation Results** ✅
+- **Order Placement**: All orders use cycle-specific lot size and stop loss values
+- **Recovery Logic**: Recovery uses cycle-specific thresholds and intervals
+- **Take Profit**: Take profit uses cycle-specific target values
+- **Cycle Management**: Max cycles respects cycle-specific limits
+- **Configuration Access**: All configuration values now use cycle-specific settings
+- **Zone Boundaries**: Zone calculations use cycle-specific `zone_threshold_pips`
+- **Grid Orders**: Grid placement uses cycle-specific `entry_interval_pips` and `grid_interval_pips`
+- **Trailing Stop-Loss**: Trailing SL calculations use cycle-specific configuration
+- **Zone Movement**: Zone movement logic uses cycle-specific configuration
+- **Configuration Versioning**: Each cycle preserves and uses its own configuration
 
 ### **Implementation Details**
 ```python
-# OLD: Direct field access (causing error)
-cycle_data['recovery_direction'] = getattr(pb_cycle, 'recovery_direction')
+# New helper methods for cycle-specific configuration access
+def get_cycle_zone_threshold_pips(self, cycle):
+    """Get zone_threshold_pips from cycle-specific config"""
+    return self.get_cycle_config_value(cycle, 'zone_threshold_pips', 50.0)
 
-# NEW: JSON field extraction (schema-compliant)
-recovery_data = getattr(pb_cycle, 'recovery_data', '{}')
-if isinstance(recovery_data, str):
-    try:
-        recovery_dict = json.loads(recovery_data)
-    except json.JSONDecodeError:
-        recovery_dict = {}
-else:
-    recovery_dict = recovery_data if recovery_data else {}
+def get_cycle_entry_interval_pips(self, cycle):
+    """Get entry_interval_pips from cycle-specific config"""
+    return self.get_cycle_config_value(cycle, 'entry_interval_pips', 50.0)
 
-cycle_data['recovery_direction'] = recovery_dict.get('recovery_direction', None)
+# Updated zone boundary calculations
+def _move_zone(self, cycle, direction: str, current_price: float):
+    zone_threshold_pips = self.get_cycle_zone_threshold_pips(cycle)
+    new_upper_boundary = new_base_price + (zone_threshold_pips * pip_value)
+    new_lower_boundary = new_base_price - (zone_threshold_pips * pip_value)
+
+# Updated grid order placement
+def _place_grid_buy_order(self, cycle, order_price, grid_level):
+    entry_interval_pips = self.get_cycle_entry_interval_pips(cycle)
+    grid_interval_pips = self.get_cycle_config_value(cycle, 'grid_interval_pips', self.grid_interval_pips)
+
+# Updated trailing stop-loss calculations
+def _update_trailing_stop_loss(self, cycle, current_price: float):
+    zone_threshold = self.get_cycle_zone_threshold_pips(cycle) * pip_value
+    calculated_trailing_sl = highest_buy_price - zone_threshold
 ```
 
 ### **Verification Results** ✅
-- **Error Elimination**: No more `'Record' object has no attribute 'recovery_direction'` errors
-- **Cycle Synchronization**: MoveGuard cycles can be properly synced from PocketBase
-- **Data Consistency**: All recovery fields extracted from correct JSON fields
-- **System Stability**: MoveGuard strategy can operate without synchronization failures
-- **Schema Compliance**: Code now matches actual PocketBase schema structure
+- **Trailing Stop-Loss**: Variable scope issues resolved, no more "new_top" errors
+- **Order Placement**: Enhanced validation prevents invalid order parameters
+- **Error Handling**: Improved error handling and logging for debugging
+- **Parameter Validation**: Stop loss distance validation prevents MetaTrader rejections
+- **Code Stability**: Strategy no longer crashes due to undefined variables
 
 ---
 

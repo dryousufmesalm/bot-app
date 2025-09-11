@@ -103,6 +103,13 @@ class MoveGuard(Strategy):
         """Initialize MoveGuard strategy configuration parameters from bot config"""
         cfg = dict(config) if isinstance(config, dict) else {}
 
+        # NEW: Handle symbol updates
+        if 'symbol' in cfg and cfg['symbol'] != self.symbol:
+            if self._update_strategy_symbol(cfg['symbol']):
+                logger.info(f"✅ Symbol updated from {self.symbol} to {cfg['symbol']}")
+            else:
+                logger.error(f"❌ Failed to update symbol to '{cfg['symbol']}' - keeping current symbol '{self.symbol}'")
+
         # Core sizing
         self.lot_size = float(cfg.get("lot_size", 0.01))
 
@@ -160,6 +167,9 @@ class MoveGuard(Strategy):
         self.auto_place_cycles = bool(cfg.get("auto_place_cycles", True))
         
         # Zone movement modes
+
+        # Update magic number in PocketBase if it has changed
+        self._update_magic_number_if_needed(cfg)
 
     def _initialize_advanced_components(self):
         """Initialize advanced components for MoveGuard"""
@@ -612,6 +622,24 @@ class MoveGuard(Strategy):
             # Add upper and lower bounds from database
             cycle_data['upper_bound'] = self._safe_float_value(getattr(pb_cycle, 'upper_bound', 0.0))
             cycle_data['lower_bound'] = self._safe_float_value(getattr(pb_cycle, 'lower_bound', 0.0))
+            
+            # Handle cycle_config data - CRITICAL for cycle-specific configuration
+            cycle_config = getattr(pb_cycle, 'cycle_config', '{}')
+            if isinstance(cycle_config, str):
+                try:
+                    cycle_config_dict = json.loads(cycle_config)
+                    cycle_data['cycle_config'] = cycle_config_dict
+                    logger.debug(f"✅ Loaded cycle_config for cycle {cycle_id} with {len(cycle_config_dict)} parameters")
+                except json.JSONDecodeError:
+                    logger.warning(f"⚠️ Invalid JSON in cycle_config for cycle {cycle_id}")
+                    cycle_data['cycle_config'] = {}
+            else:
+                cycle_data['cycle_config'] = cycle_config if cycle_config else {}
+            
+            # If cycle_config is empty, create a snapshot from current bot config for backward compatibility
+            if not cycle_data['cycle_config']:
+                cycle_data['cycle_config'] = self._create_cycle_config_snapshot()
+                logger.info(f"🔄 Created cycle_config snapshot for existing cycle {cycle_id} during sync")
             
             logger.debug(f"✅ Converted PocketBase cycle {cycle_id} to local format")
             return cycle_data
@@ -1085,7 +1113,7 @@ class MoveGuard(Strategy):
             success, order_data = MT5OrderUtils.place_buy_order(
                 meta_trader=self.meta_trader,
                 symbol=self.symbol,
-                lot_size=self.lot_size,
+                lot_size=self.lot_size,  # This will use bot config for new cycles
                 magic_number=self.bot.magic_number,
                 stop_loss_pips=0,
                 take_profit_pips=0,
@@ -1231,6 +1259,9 @@ class MoveGuard(Strategy):
             # Generate unique cycle ID
             cycle_id = f"MG_{int(time.time())}_{direction}_{username}"
             
+            # Create cycle-specific configuration snapshot from current bot config
+            cycle_config = self._create_cycle_config_snapshot()
+            
             # Ensure we have all required fields
             cycle_data = {
                 'cycle_id': cycle_id,
@@ -1269,12 +1300,14 @@ class MoveGuard(Strategy):
                 },
                 'zone_data': {
                     'base_price': float(order_data.get('price', 0.0)),
-                    'upper_boundary': float(order_data.get('price', 0.0))+self.zone_threshold_pips * self._get_pip_value(),
-                    'lower_boundary': float(order_data.get('price', 0.0))-self.zone_threshold_pips * self._get_pip_value(),
+                    'upper_boundary': float(order_data.get('price', 0.0)) + (cycle_config.get('zone_threshold_pips', 50.0) * self._get_pip_value()),
+                    'lower_boundary': float(order_data.get('price', 0.0)) - (cycle_config.get('zone_threshold_pips', 50.0) * self._get_pip_value()),
                     'movement_mode':  self.zone_movement_mode,
                     'last_movement': None
                 },
-                # MoveGuard-specific configuration
+                # Cycle-specific configuration snapshot
+                'cycle_config': cycle_config,
+                # MoveGuard-specific configuration (for backward compatibility)
                 'grid_interval_pips': float(getattr(self, 'grid_interval_pips', 50.0)),
                 'entry_interval_pips': float(getattr(self, 'entry_interval_pips', 10.0)),
                 'initial_stop_loss_pips': float(getattr(self, 'initial_stop_loss_pips', 300.0)),
@@ -1293,8 +1326,8 @@ class MoveGuard(Strategy):
                 'initial_stop_loss_price': 0.0,
                 'initial_order_open_price': float(order_data.get('price', 0.0)),
                 'initial_order_stop_loss': 0.0,
-                'upper_bound': float(order_data.get('price', 0.0))+self.zone_threshold_pips * self._get_pip_value(),
-                'lower_bound': float(order_data.get('price', 0.0))-self.zone_threshold_pips * self._get_pip_value()
+                'upper_bound': float(order_data.get('price', 0.0)) + (cycle_config.get('zone_threshold_pips', 50.0) * self._get_pip_value()),
+                'lower_bound': float(order_data.get('price', 0.0)) - (cycle_config.get('zone_threshold_pips', 50.0) * self._get_pip_value())
             }
             
             logger.info(f"✅ MoveGuard cycle data built successfully: {cycle_id}")
@@ -1304,6 +1337,166 @@ class MoveGuard(Strategy):
             logger.error(f"❌ Error building MoveGuard cycle data: {str(e)}")
             logger.error(traceback.format_exc())
             return None
+
+    def _create_cycle_config_snapshot(self):
+        """Create a snapshot of current strategy configuration for cycle-specific storage"""
+        try:
+            # Use current strategy configuration values instead of potentially stale self.config
+            # This ensures each cycle gets the configuration that was active when it was created
+            
+            # Create comprehensive configuration snapshot from current strategy state
+            cycle_config = {
+                # Core sizing - use current strategy values
+                'lot_size': float(getattr(self, 'lot_size', 0.01)),
+                
+                # Entry intervals - use current strategy values
+                'entry_interval_pips': float(getattr(self, 'entry_interval_pips', 50.0)),
+                'subsequent_entry_interval_pips': float(getattr(self, 'subsequent_entry_interval_pips', 50.0)),
+                'grid_interval_pips': float(getattr(self, 'grid_interval_pips', 50.0)),
+                
+                # Stop losses and take profit - use current strategy values
+                'initial_stop_loss_pips': float(getattr(self, 'initial_stop_loss_pips', 100.0)),
+                'cycle_stop_loss_pips': float(getattr(self, 'cycle_stop_loss_pips', 100.0)),
+                'recovery_stop_loss_pips': float(getattr(self, 'recovery_stop_loss_pips', 200.0)),
+                'cycle_take_profit_pips': float(getattr(self, 'cycle_take_profit_pips', 100.0)),
+                
+                # Recovery spacing - use current strategy values
+                'recovery_interval_pips': float(getattr(self, 'recovery_interval_pips', 50.0)),
+                'recovery_spacing_pips': float(getattr(self, 'recovery_spacing_pips', 50.0)),
+                
+                # Zones - use current strategy values
+                'zone_movement_mode': getattr(self, 'zone_movement_mode', "Move Both Sides"),
+                'zone_threshold_pips': float(getattr(self, 'zone_threshold_pips', 300.0)),
+                'zone_move_step_pips': float(getattr(self, 'zone_move_step_pips', 300.0)),
+                
+                # Multi-cycle limits - use current strategy values
+                'max_cycles': int(getattr(self, 'max_cycles', 3)),
+                'max_active_cycles': int(getattr(self, 'max_active_cycles', 3)),
+                'max_trades_per_cycle': int(getattr(self, 'max_trades_per_cycle', 50)),
+                
+                # Recovery settings - use current strategy values
+                'recovery_enabled': bool(getattr(self, 'recovery_enabled', True)),
+                
+                # Order intervals - use current strategy values
+                'order_interval_pips': float(getattr(self, 'order_interval_pips', 50.0)),
+                'reversal_threshold_pips': float(getattr(self, 'reversal_threshold_pips', 300.0)),
+                
+                # Cycle interval configuration - use current strategy values
+                'cycle_interval': float(getattr(self, 'cycle_interval', 100.0)),
+                'auto_place_cycles': bool(getattr(self, 'auto_place_cycles', True)),
+                
+                # Symbol - use current strategy value
+                'symbol': getattr(self, 'symbol', 'EURUSD'),
+                
+                # Timestamp for tracking when config was saved
+                'config_saved_at': datetime.datetime.now().isoformat(),
+                'config_version': '1.0'
+            }
+            
+            logger.info(f"✅ Cycle configuration snapshot created with {len(cycle_config)} parameters from current strategy state")
+            logger.debug(f"📋 Cycle config snapshot: lot_size={cycle_config['lot_size']}, grid_interval_pips={cycle_config['grid_interval_pips']}, zone_threshold_pips={cycle_config['zone_threshold_pips']}")
+            return cycle_config
+            
+        except Exception as e:
+            logger.error(f"❌ Error creating cycle configuration snapshot: {str(e)}")
+            logger.error(traceback.format_exc())
+            return {}
+
+    def get_cycle_config_value(self, cycle, config_key, default_value=None):
+        """Get configuration value from cycle-specific config, fallback to current strategy config"""
+        try:
+            # First try to get from cycle-specific configuration
+            if hasattr(cycle, 'cycle_config') and cycle.cycle_config:
+                cycle_config = cycle.cycle_config
+                if isinstance(cycle_config, str):
+                    try:
+                        cycle_config = json.loads(cycle_config)
+                    except json.JSONDecodeError:
+                        cycle_config = {}
+                
+                if config_key in cycle_config:
+                    value = cycle_config[config_key]
+                    logger.debug(f"📋 Using cycle-specific config for {config_key}: {value}")
+                    return value
+            
+            # Fallback to current strategy configuration values instead of potentially stale self.config
+            # Map config keys to strategy attributes
+            strategy_attr_map = {
+                'lot_size': 'lot_size',
+                'entry_interval_pips': 'entry_interval_pips',
+                'subsequent_entry_interval_pips': 'subsequent_entry_interval_pips',
+                'grid_interval_pips': 'grid_interval_pips',
+                'initial_stop_loss_pips': 'initial_stop_loss_pips',
+                'cycle_stop_loss_pips': 'cycle_stop_loss_pips',
+                'recovery_stop_loss_pips': 'recovery_stop_loss_pips',
+                'cycle_take_profit_pips': 'cycle_take_profit_pips',
+                'recovery_interval_pips': 'recovery_interval_pips',
+                'recovery_spacing_pips': 'recovery_spacing_pips',
+                'zone_movement_mode': 'zone_movement_mode',
+                'zone_threshold_pips': 'zone_threshold_pips',
+                'zone_move_step_pips': 'zone_move_step_pips',
+                'max_cycles': 'max_cycles',
+                'max_active_cycles': 'max_active_cycles',
+                'max_trades_per_cycle': 'max_trades_per_cycle',
+                'recovery_enabled': 'recovery_enabled',
+                'order_interval_pips': 'order_interval_pips',
+                'reversal_threshold_pips': 'reversal_threshold_pips',
+                'cycle_interval': 'cycle_interval',
+                'auto_place_cycles': 'auto_place_cycles',
+                'symbol': 'symbol'
+            }
+            
+            # Try to get from current strategy state
+            if config_key in strategy_attr_map:
+                strategy_attr = strategy_attr_map[config_key]
+                if hasattr(self, strategy_attr):
+                    value = getattr(self, strategy_attr)
+                    logger.debug(f"📋 Using current strategy config for {config_key}: {value}")
+                    return value
+            
+            # Final fallback to default value
+            logger.debug(f"📋 Using default value for {config_key}: {default_value}")
+            return default_value
+            
+        except Exception as e:
+            logger.error(f"❌ Error getting cycle config value for {config_key}: {str(e)}")
+            return default_value
+
+    def get_cycle_zone_threshold_pips(self, cycle):
+        """Get zone_threshold_pips from cycle-specific config"""
+        return self.get_cycle_config_value(cycle, 'zone_threshold_pips', 50.0)
+
+    def get_cycle_entry_interval_pips(self, cycle):
+        """Get entry_interval_pips from cycle-specific config"""
+        return self.get_cycle_config_value(cycle, 'entry_interval_pips', 50.0)
+
+    def get_cycle_subsequent_entry_interval_pips(self, cycle):
+        """Get subsequent_entry_interval_pips from cycle-specific config"""
+        return self.get_cycle_config_value(cycle, 'subsequent_entry_interval_pips', 50.0)
+
+    def update_configs(self, config):
+        """
+        Update the MoveGuard strategy configuration with new settings.
+        This ensures that new cycles will use the updated configuration.
+        
+        Parameters:
+        config (dict): The new configuration settings for the strategy.
+        """
+        try:
+            logger.info("🔄 Updating MoveGuard strategy configuration...")
+            
+            # Update the config reference
+            self.config = config
+            
+            # Re-initialize strategy configuration with new values
+            self._initialize_strategy_configuration(config)
+            
+            logger.info("✅ MoveGuard strategy configuration updated successfully")
+            logger.debug(f"📋 Updated config: lot_size={self.lot_size}, grid_interval_pips={self.grid_interval_pips}, zone_threshold_pips={self.zone_threshold_pips}")
+            
+        except Exception as e:
+            logger.error(f"❌ Error updating MoveGuard strategy configuration: {str(e)}")
+            logger.error(traceback.format_exc())
 
     # ==================== STRATEGY EXECUTION ====================
 
@@ -1451,6 +1644,9 @@ class MoveGuard(Strategy):
             # Check for interval-based cycle creation
             await self._check_cycle_intervals(current_price)
             
+            # Clean up active cycle levels for closed cycles
+            self._cleanup_cycle_levels()
+            
         except Exception as e:
             logger.error(f"❌ Error processing MoveGuard strategy logic: {str(e)}")
 
@@ -1481,7 +1677,7 @@ class MoveGuard(Strategy):
                 if upper == 0.0 or lower == 0.0:
                     upper, lower = self._calculate_proper_boundaries(cycle, current_price)
                 pip_value = self._get_pip_value()
-                entry_interval_pips = getattr(cycle, 'entry_interval_pips', self.entry_interval_pips)
+                entry_interval_pips = self.get_cycle_entry_interval_pips(cycle)
                 initial_offset = entry_interval_pips * pip_value
 
                 active_order_count = len([o for o in getattr(cycle, 'orders', []) if o.get('status') == 'active'])
@@ -1509,8 +1705,10 @@ class MoveGuard(Strategy):
                         grid_start_price = upper + (entry_interval_pips * pip_value)
                         logger.info(f"🎯 MoveGuard placing first BUY order - price {current_price} >= upper+offset {upper + initial_offset}, placing at grid_start_price {grid_start_price}")
                         self._place_initial_order(cycle, 'BUY', grid_start_price)
-                        cycle.lower_bound = upper-self.zone_threshold_pips * pip_value
-                        lower= cycle.lower_bound
+                        # Use cycle-specific zone_threshold_pips from cycle_config
+                        cycle_zone_threshold_pips = cycle.cycle_config.get('zone_threshold_pips', 50.0) if hasattr(cycle, 'cycle_config') and cycle.cycle_config else 50.0
+                        cycle.lower_bound = upper - (cycle_zone_threshold_pips * pip_value)
+                        lower = cycle.lower_bound
                         #update zone data
                         cycle.zone_data['upper_boundary'] = upper
                         cycle.zone_data['lower_boundary'] = lower
@@ -1522,8 +1720,10 @@ class MoveGuard(Strategy):
                         grid_start_price = lower - (entry_interval_pips * pip_value)
                         logger.info(f"🎯 MoveGuard placing first SELL order - price {current_price} <= lower-offset {lower - initial_offset}, placing at grid_start_price {grid_start_price}")
                         self._place_initial_order(cycle, 'SELL', grid_start_price)
-                        cycle.upper_bound = lower+self.zone_threshold_pips * pip_value
-                        upper= cycle.upper_bound
+                        # Use cycle-specific zone_threshold_pips from cycle_config
+                        cycle_zone_threshold_pips = self.get_cycle_zone_threshold_pips(cycle)
+                        cycle.upper_bound = lower + (cycle_zone_threshold_pips * pip_value)
+                        upper = cycle.upper_bound
                         #update zone data   
                         cycle.zone_data['upper_boundary'] = upper
                         cycle.zone_data['lower_boundary'] = lower
@@ -1536,8 +1736,8 @@ class MoveGuard(Strategy):
                     
                     # Get grid parameters
                     pip_value = self._get_pip_value()
-                    grid_interval_pips = getattr(cycle, 'grid_interval_pips', self.grid_interval_pips)
-                    entry_interval_pips = getattr(cycle, 'entry_interval_pips', self.entry_interval_pips)
+                    grid_interval_pips = self.get_cycle_config_value(cycle, 'grid_interval_pips', self.grid_interval_pips)
+                    entry_interval_pips = self.get_cycle_entry_interval_pips(cycle)
                     
                     # Calculate grid start price and target price for this level
                     if cycle.direction == 'BUY':
@@ -1551,7 +1751,8 @@ class MoveGuard(Strategy):
                             self._place_grid_buy_order(cycle, current_price, grid_level)
                             cycle.highest_buy_price = max(cycle.highest_buy_price, current_price)
                             # Update trailing stop-loss after placing new buy order
-                            cycle.trailing_stop_loss = cycle.highest_buy_price-self.zone_threshold_pips * pip_value
+                            cycle_zone_threshold_pips = self.get_cycle_zone_threshold_pips(cycle)
+                            cycle.trailing_stop_loss = cycle.highest_buy_price - (cycle_zone_threshold_pips * pip_value)
                             cycle.trailing_stop_loss = max(cycle.trailing_stop_loss, upper)
                             continue
                             
@@ -1566,7 +1767,8 @@ class MoveGuard(Strategy):
                             self._place_grid_sell_order(cycle, current_price, grid_level)
                             cycle.lowest_sell_price = min(cycle.lowest_sell_price, current_price)
                             # Update trailing stop-loss after placing new sell order
-                            cycle.trailing_stop_loss = cycle.lowest_sell_price+self.zone_threshold_pips * pip_value
+                            cycle_zone_threshold_pips = self.get_cycle_zone_threshold_pips(cycle)
+                            cycle.trailing_stop_loss = cycle.lowest_sell_price + (cycle_zone_threshold_pips * pip_value)
                             cycle.trailing_stop_loss = min(cycle.trailing_stop_loss, lower)
                             continue
                     
@@ -1586,12 +1788,16 @@ class MoveGuard(Strategy):
             pip_value = self._get_pip_value()
             sl_price = 0.0
             tp_price = 0.0
+            # Get cycle-specific configuration values
+            lot_size = self.get_cycle_config_value(cycle, 'lot_size', self.lot_size)
+            initial_stop_loss_pips = self.get_cycle_config_value(cycle, 'initial_stop_loss_pips', self.initial_stop_loss_pips)
+            
             if direction == 'BUY':
-                if self.initial_stop_loss_pips > 0:
-                    sl_price = round(order_price - (self.initial_stop_loss_pips * pip_value), 2)
+                if initial_stop_loss_pips > 0:
+                    sl_price = round(order_price - (initial_stop_loss_pips * pip_value), 2)
                 result = self.meta_trader.place_buy_order(
                     symbol=self.symbol,
-                    volume=self.lot_size,
+                    volume=lot_size,
                     price=order_price,
                     stop_loss=sl_price,
                     take_profit=0.0,
@@ -1599,11 +1805,11 @@ class MoveGuard(Strategy):
                 )
                 order_direction = 'BUY'
             else:
-                if self.initial_stop_loss_pips > 0:
-                    sl_price = round(order_price + (self.initial_stop_loss_pips * pip_value), 2)
+                if initial_stop_loss_pips > 0:
+                    sl_price = round(order_price + (initial_stop_loss_pips * pip_value), 2)
                 result = self.meta_trader.place_sell_order(
                     symbol=self.symbol,
-                    volume=self.lot_size,
+                    volume=lot_size,
                     price=order_price,
                     stop_loss=sl_price,
                     take_profit=0.0,
@@ -1621,7 +1827,7 @@ class MoveGuard(Strategy):
                     'ticket': result['order'].get('ticket'),
                     'direction': order_direction,
                     'price': order_price,
-                    'lot_size': self.lot_size,
+                    'lot_size': lot_size,
                     'is_initial': True,
                     'order_type': 'grid_0',
                     'status': 'active',
@@ -1692,7 +1898,9 @@ class MoveGuard(Strategy):
     def _check_and_close_initial_order(self, cycle, current_price: float):
         """Close the cycle entry order if price hits its implicit SL threshold; keep cycle open."""
         try:
-            if self.initial_stop_loss_pips <= 0:
+            # Get cycle-specific configuration values
+            initial_stop_loss_pips = self.get_cycle_config_value(cycle, 'initial_stop_loss_pips', self.initial_stop_loss_pips)
+            if initial_stop_loss_pips <= 0:
                 return
             pip_value = self._get_pip_value()
             # Find active cycle entry order (marked as is_initial=True and is_grid=False)
@@ -1705,7 +1913,7 @@ class MoveGuard(Strategy):
                 return
             entry = initial.get('price', 0.0)
             direction = initial.get('direction', 'BUY')
-            threshold_pips = self.initial_stop_loss_pips
+            threshold_pips = initial_stop_loss_pips
             hit = False
             if direction == 'BUY':
                 sl_price = entry - (threshold_pips * pip_value)
@@ -1893,8 +2101,8 @@ class MoveGuard(Strategy):
                 base = self._safe_float_value(get_value('entry_price'))
                 zone_data_val = {
                     'base_price': base,
-                    'upper_boundary': base + (self.zone_threshold_pips * pip_value),
-                    'lower_boundary': base - (self.zone_threshold_pips * pip_value),
+                    'upper_boundary': base + (self.get_cycle_zone_threshold_pips(cycle) * pip_value),
+                    'lower_boundary': base - (self.get_cycle_zone_threshold_pips(cycle) * pip_value),
                     'movement_mode': getattr(self, 'zone_movement_mode', 'Move Both Sides'),
                     'last_movement': None
                 }
@@ -1904,6 +2112,13 @@ class MoveGuard(Strategy):
             # Ensure we have the latest profit and volume calculations
             # Force update cycle statistics to get accurate profit and volume data
             self._update_cycle_statistics_with_profit(cycle)
+
+            # Get cycle_config safely - it might not exist on the cycle object
+            cycle_config = get_value('cycle_config', {})
+            if not cycle_config:
+                # If cycle_config doesn't exist, create a snapshot from current bot config
+                cycle_config = self._create_cycle_config_snapshot()
+                logger.info(f"🔄 Created cycle_config snapshot for cycle {cycle.cycle_id} during database update")
 
             cycle_data = {
                 'id': cycle.cycle_id,
@@ -1943,7 +2158,9 @@ class MoveGuard(Strategy):
                 # Add trailing stop-loss and price tracking fields
                 'trailing_stop_loss': self._safe_float_value(getattr(cycle, 'trailing_stop_loss', 0.0)),
                 'highest_buy_price': self._safe_float_value(getattr(cycle, 'highest_buy_price', 0.0)),
-                'lowest_sell_price': self._safe_float_value(getattr(cycle, 'lowest_sell_price', 999999.0))
+                'lowest_sell_price': self._safe_float_value(getattr(cycle, 'lowest_sell_price', 999999.0)),
+                # CRITICAL: Include cycle_config for cycle-specific configuration storage
+                'cycle_config': self._serialize_data(cycle_config)
             }
             
             return cycle_data
@@ -2165,9 +2382,14 @@ class MoveGuard(Strategy):
         try:
             logger.info(f"📈 MoveGuard placing grid order: level={grid_level}, price={current_price}")
             
+            # Get cycle-specific configuration values
+            max_trades_per_cycle = self.get_cycle_config_value(cycle, 'max_trades_per_cycle', self.max_trades_per_cycle)
+            grid_interval_pips = self.get_cycle_config_value(cycle, 'grid_interval_pips', self.grid_interval_pips)
+            entry_interval_pips = self.get_cycle_config_value(cycle, 'entry_interval_pips', self.entry_interval_pips)
+            
             # Check if we've reached max trades per cycle
-            if len(cycle.orders) >= self.max_trades_per_cycle:
-                logger.info(f"⚠️ Cycle {cycle.cycle_id} has reached max trades ({self.max_trades_per_cycle})")
+            if len(cycle.orders) >= max_trades_per_cycle:
+                logger.info(f"⚠️ Cycle {cycle.cycle_id} has reached max trades ({max_trades_per_cycle})")
                 return False
             
             # Determine order direction based on cycle direction
@@ -2175,8 +2397,6 @@ class MoveGuard(Strategy):
             
             # Calculate order price based on grid level and boundaries
             pip_value = self._get_pip_value()
-            grid_interval_pips = getattr(cycle, 'grid_interval_pips', self.grid_interval_pips)
-            entry_interval_pips = getattr(cycle, 'entry_interval_pips', self.entry_interval_pips)
             
             # Get zone boundaries
             zone_data = cycle.zone_data
@@ -2223,10 +2443,12 @@ class MoveGuard(Strategy):
         try:
             logger.info(f"📈 MoveGuard placing grid BUY order at {order_price}")
             
+            # Get cycle-specific configuration values
+            initial_stop_loss_pips = self.get_cycle_config_value(cycle, 'initial_stop_loss_pips', self.initial_stop_loss_pips)
+            lot_size = self.get_cycle_config_value(cycle, 'lot_size', self.lot_size)
+            
             # Calculate stop loss and take profit
             pip_value = self._get_pip_value()
-            initial_stop_loss_pips = getattr(cycle, 'initial_stop_loss_pips', self.initial_stop_loss_pips)
-            lot_size = getattr(cycle, 'lot_size', self.lot_size)
             
             # Determine if this is the first grid order (apply SL only for the first grid)
             is_first_grid = True
@@ -2237,6 +2459,22 @@ class MoveGuard(Strategy):
             first_grid_sl = 0
             if is_first_grid and initial_stop_loss_pips > 0:
                 first_grid_sl = order_price - (initial_stop_loss_pips * pip_value)
+                # Validate stop loss is reasonable (at least 1 pip away from order price)
+                min_sl_distance = pip_value * 1.0  # 1 pip minimum
+                if order_price - first_grid_sl < min_sl_distance:
+                    first_grid_sl = order_price - min_sl_distance
+                    logger.warning(f"⚠️ Adjusted BUY stop loss to minimum distance: {first_grid_sl:.5f}")
+
+            # Validate order parameters before placement
+            if lot_size <= 0:
+                logger.error(f"❌ Invalid lot size for BUY order: {lot_size}")
+                return False
+            
+            if order_price <= 0:
+                logger.error(f"❌ Invalid order price for BUY order: {order_price}")
+                return False
+            
+            logger.debug(f"📋 Placing BUY order: symbol={self.symbol}, volume={lot_size}, price={order_price:.5f}, sl={first_grid_sl:.5f}, grid_level={grid_level}")
             
             # Place order through MetaTrader using the correct method
             order_result = self.meta_trader.place_buy_order(
@@ -2245,7 +2483,7 @@ class MoveGuard(Strategy):
                 price=order_price,
                 stop_loss=first_grid_sl,
                 take_profit=0,
-                comment=f"Grid_{grid_level}"
+                comment=f"MoveGuard_Grid_{grid_level}"
             )
             
             if order_result and isinstance(order_result, dict) and 'order' in order_result:
@@ -2315,10 +2553,12 @@ class MoveGuard(Strategy):
         try:
             logger.info(f"📉 MoveGuard placing grid SELL order at {order_price}")
             
+            # Get cycle-specific configuration values
+            initial_stop_loss_pips = self.get_cycle_config_value(cycle, 'initial_stop_loss_pips', self.initial_stop_loss_pips)
+            lot_size = self.get_cycle_config_value(cycle, 'lot_size', self.lot_size)
+            
             # Calculate stop loss and take profit
             pip_value = self._get_pip_value()
-            initial_stop_loss_pips = getattr(cycle, 'initial_stop_loss_pips', self.initial_stop_loss_pips)
-            lot_size = getattr(cycle, 'lot_size', self.lot_size)
 
             # Determine if this is the first grid order (apply SL only for the first grid)
             is_first_grid = True
@@ -2329,7 +2569,22 @@ class MoveGuard(Strategy):
             first_grid_sl = 0
             if is_first_grid and initial_stop_loss_pips > 0:
                 first_grid_sl = order_price + (initial_stop_loss_pips * pip_value)
+                # Validate stop loss is reasonable (at least 1 pip away from order price)
+                min_sl_distance = pip_value * 1.0  # 1 pip minimum
+                if first_grid_sl - order_price < min_sl_distance:
+                    first_grid_sl = order_price + min_sl_distance
+                    logger.warning(f"⚠️ Adjusted SELL stop loss to minimum distance: {first_grid_sl:.5f}")
 
+            # Validate order parameters before placement
+            if lot_size <= 0:
+                logger.error(f"❌ Invalid lot size for SELL order: {lot_size}")
+                return False
+            
+            if order_price <= 0:
+                logger.error(f"❌ Invalid order price for SELL order: {order_price}")
+                return False
+            
+            logger.debug(f"📋 Placing SELL order: symbol={self.symbol}, volume={lot_size}, price={order_price:.5f}, sl={first_grid_sl:.5f}, grid_level={grid_level}")
             
             # Place order through MetaTrader using the correct method
             order_result = self.meta_trader.place_sell_order(
@@ -2410,8 +2665,8 @@ class MoveGuard(Strategy):
             if not hasattr(cycle, 'zone_data') or not cycle.zone_data:
                 cycle.zone_data = {
                     'base_price': cycle.entry_price,
-                    'upper_boundary': cycle.entry_price + (self.zone_threshold_pips * self._get_pip_value()),
-                    'lower_boundary': cycle.entry_price - (self.zone_threshold_pips * self._get_pip_value()),
+                    'upper_boundary': cycle.entry_price + (self.get_cycle_zone_threshold_pips(cycle) * self._get_pip_value()),
+                    'lower_boundary': cycle.entry_price - (self.get_cycle_zone_threshold_pips(cycle) * self._get_pip_value()),
                     'movement_mode': self.zone_movement_mode,
                     'last_movement': None
                 }
@@ -2463,7 +2718,7 @@ class MoveGuard(Strategy):
             
             # Calculate new zone boundaries
             pip_value = self._get_pip_value()
-            zone_threshold_pips = self.zone_threshold_pips
+            zone_threshold_pips = self.get_cycle_zone_threshold_pips(cycle)
             
             if direction == 'UP':
                 # Move zone up - new base price is current price
@@ -2549,7 +2804,8 @@ class MoveGuard(Strategy):
             total_loss = self._calculate_cycle_total_loss(cycle)
             
             # Check if loss exceeds recovery threshold
-            recovery_threshold = self.recovery_stop_loss_pips * self._get_pip_value()
+            recovery_stop_loss_pips = self.get_cycle_config_value(cycle, 'recovery_stop_loss_pips', self.recovery_stop_loss_pips)
+            recovery_threshold = recovery_stop_loss_pips * self._get_pip_value()
             
             if total_loss > recovery_threshold:
                 logger.info(f"🚨 MoveGuard recovery triggered for cycle {cycle.cycle_id}: loss={total_loss:.5f}")
@@ -2576,7 +2832,8 @@ class MoveGuard(Strategy):
             
             # Check if recovery should continue
             total_loss = self._calculate_cycle_total_loss(cycle)
-            recovery_threshold = self.recovery_stop_loss_pips * self._get_pip_value()
+            recovery_stop_loss_pips = self.get_cycle_config_value(cycle, 'recovery_stop_loss_pips', self.recovery_stop_loss_pips)
+            recovery_threshold = recovery_stop_loss_pips * self._get_pip_value()
             
             if total_loss <= recovery_threshold:
                 # Recovery successful, exit recovery mode
@@ -2593,7 +2850,8 @@ class MoveGuard(Strategy):
                 price_diff = abs(current_price - last_recovery_order['price'])
                 pips_diff = price_diff / pip_value
                 
-                if pips_diff >= self.recovery_interval_pips:
+                recovery_interval_pips = self.get_cycle_config_value(cycle, 'recovery_interval_pips', self.recovery_interval_pips)
+                if pips_diff >= recovery_interval_pips:
                     self._place_recovery_order(cycle, current_price)
                     
         except Exception as e:
@@ -2610,26 +2868,31 @@ class MoveGuard(Strategy):
             # Calculate stop loss and take profit
             pip_value = self._get_pip_value()
             
+            # Get cycle-specific configuration values
+            lot_size = self.get_cycle_config_value(cycle, 'lot_size', self.lot_size)
+            recovery_stop_loss_pips = self.get_cycle_config_value(cycle, 'recovery_stop_loss_pips', self.recovery_stop_loss_pips)
+            cycle_take_profit_pips = self.get_cycle_config_value(cycle, 'cycle_take_profit_pips', self.cycle_take_profit_pips)
+            
             # Place order through MetaTrader using the correct methods
             if order_direction == 'BUY':
-                # stop_loss = current_price - (self.recovery_stop_loss_pips * pip_value)
-                # take_profit = current_price + (self.cycle_take_profit_pips * pip_value)
+                # stop_loss = current_price - (recovery_stop_loss_pips * pip_value)
+                # take_profit = current_price + (cycle_take_profit_pips * pip_value)
                 
                 order_result = self.meta_trader.place_buy_order(
                     symbol=self.symbol,
-                    volume=self.lot_size,
+                    volume=lot_size,
                     price=current_price,
                     stop_loss=0,
                     take_profit=0,
                     comment="MoveGuard_Recovery"
                 )
             else:  # SELL
-                # stop_loss = current_price + (self.recovery_stop_loss_pips * pip_value)
-                # take_profit = current_price - (self.cycle_take_profit_pips * pip_value)
+                # stop_loss = current_price + (recovery_stop_loss_pips * pip_value)
+                # take_profit = current_price - (cycle_take_profit_pips * pip_value)
                 
                 order_result = self.meta_trader.place_sell_order(
                     symbol=self.symbol,
-                    volume=self.lot_size,
+                    volume=lot_size,
                     price=current_price,
                     stop_loss=0,
                     take_profit=0,
@@ -2646,7 +2909,7 @@ class MoveGuard(Strategy):
                     'order_id': order_result['order'].get('ticket'),
                     'direction': order_direction,
                     'price': current_price,
-                    'lot_size': self.lot_size,
+                    'lot_size': lot_size,
                     'type': 'recovery',
                     'status': 'active',
                     'placed_at': datetime.datetime.now().isoformat(),
@@ -2725,7 +2988,7 @@ class MoveGuard(Strategy):
                         # Move zone: new top = highest_buy_price, bottom = top - zone_size_pips
                         pip_value = self._get_pip_value()
                         new_top = max(getattr(cycle, 'highest_buy_price', 0.0), upper)
-                        new_bottom = new_top - (self.zone_threshold_pips * pip_value)
+                        new_bottom = new_top - (self.get_cycle_zone_threshold_pips(cycle) * pip_value)
                         cycle.zone_data.update({
                             'base_price': new_top,
                             'upper_boundary': new_top,
@@ -2746,8 +3009,8 @@ class MoveGuard(Strategy):
                 self._update_cycle_orders_profit_from_mt5(cycle)
                 
                 total_profit_dollars = self._calculate_cycle_total_profit_dollars(cycle, current_price)
-                # Use cycle_take_profit_pips as dollars directly (not pips)
-                take_profit_dollars = self.cycle_take_profit_pips
+                # Use cycle-specific take profit configuration
+                take_profit_dollars = self.get_cycle_config_value(cycle, 'cycle_take_profit_pips', self.cycle_take_profit_pips)
                 
                 if total_profit_dollars >= take_profit_dollars:
                     logger.info(f"🎯 MoveGuard take profit reached for cycle {cycle.cycle_id}: ${total_profit_dollars:.2f} (target: ${take_profit_dollars:.2f})")
@@ -3642,7 +3905,7 @@ class MoveGuard(Strategy):
         """Calculate proper upper and lower boundaries according to MoveGuard rules"""
         try:
             pip_value = self._get_pip_value()
-            zone_threshold = self.zone_threshold_pips * pip_value
+            zone_threshold = self.get_cycle_zone_threshold_pips(cycle) * pip_value
             
             # Get active orders to determine cycle state
             active_orders = [o for o in getattr(cycle, 'orders', []) if o.get('status') == 'active']
@@ -3709,7 +3972,7 @@ class MoveGuard(Strategy):
             logger.error(f"❌ Error calculating proper boundaries: {str(e)}")
             # Fallback to original calculation
             pip_value = self._get_pip_value()
-            zone_threshold = self.zone_threshold_pips * pip_value
+            zone_threshold = self.get_cycle_zone_threshold_pips(cycle) * pip_value
             upper = cycle.entry_price + zone_threshold
             lower = cycle.entry_price - zone_threshold
             return upper, lower
@@ -3718,7 +3981,7 @@ class MoveGuard(Strategy):
         """Update trailing stop-loss based on highest/lowest order price with zone boundary constraints"""
         try:
             pip_value = self._get_pip_value()
-            zone_threshold = self.zone_threshold_pips * pip_value
+            zone_threshold = self.get_cycle_zone_threshold_pips(cycle) * pip_value
             
             # Get current zone boundaries
             upper = cycle.zone_data.get('upper_boundary', 0.0) if hasattr(cycle, 'zone_data') else 0.0
@@ -3855,10 +4118,15 @@ class MoveGuard(Strategy):
                
                 # Move zone: new top = highest_buy_price, new bottom = trailing_sl_price
                 pip_value = self._get_pip_value()
-                zone_threshold = self.zone_threshold_pips * pip_value
+                zone_threshold = self.get_cycle_zone_threshold_pips(cycle) * pip_value
 
                 highest_buy_price = max([o.get('price', 0.0) for o in getattr(cycle, 'orders', []) 
                                 if o.get('status') == 'active' and o.get('direction') == 'BUY'])
+                
+                # Initialize zone movement variables
+                new_top = cycle.zone_data.get('upper_boundary', 0.0)
+                new_bottom = cycle.zone_data.get('lower_boundary', 0.0)
+                
                 if self.zone_movement_mode == 'Move Both Sides' or self.zone_movement_mode == 'Move Up Only':
                     if highest_buy_price is not None:
                         new_bottom = highest_buy_price - zone_threshold
@@ -3901,10 +4169,15 @@ class MoveGuard(Strategy):
                 
                 # Move zone: new top = trailing_sl_price, new bottom = lowest_sell_price
                 pip_value = self._get_pip_value()
-                zone_threshold = self.zone_threshold_pips * pip_value
+                zone_threshold = self.get_cycle_zone_threshold_pips(cycle) * pip_value
                
                 lowest_sell_price = min([o.get('price', 999999.0) for o in getattr(cycle, 'orders', []) 
                                 if o.get('status') == 'active' and o.get('direction') == 'SELL'])
+                
+                # Initialize zone movement variables
+                new_top = cycle.zone_data.get('upper_boundary', 0.0)
+                new_bottom = cycle.zone_data.get('lower_boundary', 0.0)
+                
                 if self.zone_movement_mode=='Move Both Sides' or self.zone_movement_mode=='Move Down Only':
                     if lowest_sell_price is not None:
                         new_top = lowest_sell_price + zone_threshold
@@ -3950,7 +4223,7 @@ class MoveGuard(Strategy):
                 return
             
             pip_value = self._get_pip_value()
-            zone_threshold = self.zone_threshold_pips * pip_value
+            zone_threshold = self.get_cycle_zone_threshold_pips(cycle) * pip_value
             
             if cycle.direction == 'BUY':
                 # Get active buy orders
@@ -4005,16 +4278,16 @@ class MoveGuard(Strategy):
             cycles_at_level = []
             active_cycles = self.multi_cycle_manager.get_all_active_cycles()
             
-            # Use a more appropriate tolerance based on the symbol's pip value
+            # Use a more appropriate tolerance - 1 pip instead of 10% of pip value
             pip_value = self._get_pip_value()
-            tolerance = pip_value * 0.1  # 10% of pip value as tolerance
+            tolerance = pip_value * 1.0  # 1 pip tolerance for better cycle detection
             
             for cycle in active_cycles:
                 # Check if cycle is at the same price level with appropriate tolerance
                 if abs(cycle.entry_price - price_level) <= tolerance:
-                    if direction is None or cycle.direction == direction:
-                        cycles_at_level.append(cycle)
-                        logger.debug(f"Found cycle {cycle.cycle_id} at level {price_level} (entry_price: {cycle.entry_price}, tolerance: {tolerance})")
+                    # Remove direction filtering - detect any cycle at this price level
+                    cycles_at_level.append(cycle)
+                    logger.debug(f"Found cycle {cycle.cycle_id} at level {price_level} (entry_price: {cycle.entry_price}, direction: {cycle.direction}, tolerance: {tolerance})")
             
             return cycles_at_level
         except Exception as e:
@@ -4033,9 +4306,9 @@ class MoveGuard(Strategy):
     def _get_cycle_level_key(self, price_level):
         """Get a standardized level key for cycle tracking"""
         try:
-            # Round to 2 decimal places for consistent level comparison
+            # Round to 4 decimal places for better precision while handling floating point differences
             # This ensures that small floating point differences don't create separate levels
-            return round(price_level, 2)
+            return round(price_level, 4)
         except Exception as e:
             logger.error(f"❌ Error creating level key: {str(e)}")
             return price_level
@@ -4058,6 +4331,27 @@ class MoveGuard(Strategy):
                 logger.debug(f"🗑️ Removed level {level_key} from active cycle levels tracking")
         except Exception as e:
             logger.error(f"❌ Error removing cycle level: {str(e)}")
+
+    def _cleanup_cycle_levels(self):
+        """Clean up active cycle levels for closed cycles"""
+        try:
+            active_cycles = self.multi_cycle_manager.get_all_active_cycles()
+            active_prices = set()
+            
+            # Collect all active cycle entry prices
+            for cycle in active_cycles:
+                if hasattr(cycle, 'entry_price') and cycle.entry_price:
+                    level_key = self._get_cycle_level_key(cycle.entry_price)
+                    active_prices.add(level_key)
+            
+            # Remove levels that no longer have active cycles
+            levels_to_remove = self.active_cycle_levels - active_prices
+            for level in levels_to_remove:
+                self.active_cycle_levels.remove(level)
+                logger.debug(f"🧹 Cleaned up inactive level {level} from tracking")
+                
+        except Exception as e:
+            logger.error(f"❌ Error cleaning up cycle levels: {str(e)}")
 
     def _is_level_active(self, price_level):
         """Check if a price level is already active (has a cycle)"""
@@ -4085,8 +4379,9 @@ class MoveGuard(Strategy):
             
             # Check if we can create more cycles (respect max_active_cycles limit)
             active_cycles = self.multi_cycle_manager.get_all_active_cycles()
-            if len(active_cycles) >= self.max_active_cycles:
-                logger.info(f"🎯 Max active cycles ({self.max_active_cycles}) reached, skipping interval cycle creation. Current active cycles: {len(active_cycles)}")
+            max_active_cycles = self.get_cycle_config_value(None, 'max_active_cycles', self.max_active_cycles)
+            if len(active_cycles) >= max_active_cycles:
+                logger.info(f"🎯 Max active cycles ({max_active_cycles}) reached, skipping interval cycle creation. Current active cycles: {len(active_cycles)}")
                 if direction == "BUY" and current_level > self.meta_trader.get_ask(self.symbol):
                     return
                 if direction == "SELL" and current_level < self.meta_trader.get_bid(self.symbol):
@@ -4111,15 +4406,39 @@ class MoveGuard(Strategy):
             has_existing_cycle = self._has_cycle_at_level(current_level, direction)
             is_level_active = self._is_level_active(current_level)
             
+            # Enhanced logging for debugging cycle creation decisions
+            logger.debug(f"🔍 Cycle creation check: level={current_level:.5f}, direction={direction}, "
+                        f"has_existing_cycle={has_existing_cycle}, is_level_active={is_level_active}, "
+                        f"last_cycle_price={self.last_cycle_price:.5f}")
+            
             if not has_existing_cycle and not is_level_active:
-                logger.info(f"🔄 No existing cycle found at level {current_level} for {direction} direction - creating new cycle")
-                # Create new cycle with initial order
-                success = await self._create_interval_cycle_sync(direction, current_level)
-                if success:
-                    # Add level to active tracking
-                    self._add_cycle_level(current_level)
+                # Additional validation: ensure we're not creating cycles too close to existing ones
+                min_distance = self.cycle_interval * self._get_pip_value() * 0.8  # 80% of cycle interval
+                too_close = False
+                
+                for cycle in active_cycles:
+                    distance = abs(cycle.entry_price - current_level)
+                    if distance < min_distance:
+                        too_close = True
+                        logger.debug(f"🚫 Skipping cycle creation at {current_level:.5f} - too close to existing cycle at {cycle.entry_price:.5f} (distance: {distance:.5f})")
+                        break
+                
+                if not too_close:
+                    logger.info(f"🔄 No existing cycle found at level {current_level:.5f} for {direction} direction - creating new cycle")
+                    # Create new cycle with initial order
+                    success = await self._create_interval_cycle_sync(direction, current_level)
+                    if success:
+                        # Add level to active tracking
+                        self._add_cycle_level(current_level)
+                        # Update last_cycle_price to prevent immediate re-creation
+                        self.last_cycle_price = current_level
+                        logger.info(f"✅ Successfully created {direction} cycle at level {current_level:.5f}")
+                   
+                else:
+                    # Update last_cycle_price to prevent getting stuck
+                    self.last_cycle_price = current_level
             else:
-                logger.debug(f"🔄 Cycle already exists at level {current_level} for {direction} direction - skipping creation")
+                logger.debug(f"🔄 Cycle already exists at level {current_level:.5f} for {direction} direction - skipping creation")
                 # Update last_cycle_price to prevent getting stuck
                 self.last_cycle_price = current_level
                 
@@ -4140,8 +4459,9 @@ class MoveGuard(Strategy):
             
             # Double-check if we can create more cycles (safety check)
             active_cycles = self.multi_cycle_manager.get_all_active_cycles()
-            if len(active_cycles) >= self.max_active_cycles:
-                logger.warning(f"Cannot create new cycle: max cycles ({self.max_active_cycles}) reached")
+            max_active_cycles = self.get_cycle_config_value(None, 'max_active_cycles', self.max_active_cycles)
+            if len(active_cycles) >= max_active_cycles:
+                logger.warning(f"Cannot create new cycle: max cycles ({max_active_cycles}) reached")
                 return False
                 
         except Exception as e:
@@ -4214,3 +4534,159 @@ class MoveGuard(Strategy):
         except Exception as e:
             logger.error(f"❌ Error getting last cycle price: {str(e)}")
             return 0.0
+
+    def _update_magic_number_if_needed(self, cfg):
+        """Update magic number in PocketBase if it has changed"""
+        try:
+            if 'magic_number' in cfg and cfg['magic_number'] != self.bot.magic_number:
+                # Update magic number in PocketBase
+                if hasattr(self.client, 'update_bot_magic_number'):
+                    result = self.client.update_bot_magic_number(self.bot.id, cfg['magic_number'])
+                    if result:
+                        self.bot.magic_number = cfg['magic_number']
+                        logger.info(f"✅ Magic number updated to {cfg['magic_number']} in PocketBase")
+                        self.meta_trader.magic_number = cfg['magic_number']
+                        logger.info(f"✅ Magic number set on MetaTrader instance")
+                    else:
+                        logger.error(f"❌ Failed to update magic number in PocketBase")
+                else:
+                    logger.warning(f"⚠️ Client does not support update_bot_magic_number method")
+        except Exception as e:
+            logger.error(f"❌ Error updating magic number: {str(e)}")
+
+    def _update_strategy_symbol(self, new_symbol: str) -> bool:
+        """Update the strategy symbol and re-initialize dependent components"""
+        try:
+            # Validate new symbol
+            if not self._validate_symbol(new_symbol):
+                return False
+            
+            old_symbol = self.symbol
+            self.symbol = new_symbol
+            
+            # Re-initialize symbol-dependent components
+            self._reinitialize_symbol_dependent_components()
+            
+            # Update MetaTrader symbol info
+            self._update_metatrader_symbol_info()
+            
+            logger.info(f"🔄 MoveGuard symbol updated: {old_symbol} → {new_symbol}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"❌ Error updating symbol: {str(e)}")
+            return False
+
+    def _validate_symbol(self, symbol: str) -> bool:
+        """Validate that a symbol is accessible and valid in MetaTrader"""
+        try:
+            # Check if symbol exists in MetaTrader
+            symbol_info = self.meta_trader.get_symbol_info(symbol)
+            if not symbol_info:
+                logger.error(f"❌ Symbol '{symbol}' not found in MetaTrader")
+                return False
+            
+            # Check if symbol has valid point value (pip value)
+            if not hasattr(symbol_info, 'point') or symbol_info.point <= 0:
+                logger.error(f"❌ Symbol '{symbol}' has invalid point value")
+                return False
+            
+            # Check if symbol is accessible for trading
+            try:
+                bid = self.meta_trader.get_bid(symbol)
+                ask = self.meta_trader.get_ask(symbol)
+                if bid is None or ask is None or bid <= 0 or ask <= 0:
+                    logger.error(f"❌ Symbol '{symbol}' has invalid bid/ask prices")
+                    return False
+            except Exception as e:
+                logger.error(f"❌ Cannot get bid/ask for symbol '{symbol}': {str(e)}")
+                return False
+            
+            logger.info(f"✅ Symbol '{symbol}' validation successful")
+            return True
+            
+        except Exception as e:
+            logger.error(f"❌ Error validating symbol '{symbol}': {str(e)}")
+            return False
+
+    def _reinitialize_symbol_dependent_components(self):
+        """Re-initialize components that depend on the symbol"""
+        try:
+            logger.info(f"🔄 Re-initializing symbol-dependent components for symbol: {self.symbol}")
+            
+            # Re-initialize enhanced zone detection
+            self.enhanced_zone_detection = EnhancedZoneDetection(
+                self.symbol, self.reversal_threshold_pips, self.order_interval_pips
+            )
+            logger.info("✅ EnhancedZoneDetection re-initialized")
+            
+            # Re-initialize enhanced order manager
+            self.enhanced_order_manager = EnhancedOrderManager(
+                self.meta_trader, self.symbol, self.bot.magic_number
+            )
+            logger.info("✅ EnhancedOrderManager re-initialized")
+            
+            # Re-initialize direction controller
+            self.direction_controller = DirectionController(self.symbol)
+            logger.info("✅ DirectionController re-initialized")
+            
+            # Reset any symbol-specific state
+            self._reset_symbol_specific_state()
+            
+            logger.info(f"✅ All symbol-dependent components re-initialized for {self.symbol}")
+            
+        except Exception as e:
+            logger.error(f"❌ Error re-initializing symbol-dependent components: {str(e)}")
+            raise
+
+    def _reset_symbol_specific_state(self):
+        """Reset any symbol-specific internal state"""
+        try:
+            # Reset market data tracking
+            self.current_market_price = None
+            self.last_candle_time = None
+            
+            # Reset zone state
+            self.initial_threshold_breached = False
+            self.zone_activated = False
+            
+            # Reset grid state tracking
+            self.current_grid_level = 0
+            self.grid_direction = None
+            self.last_grid_price = 0.0
+            
+            # Reset zone state tracking
+            self.active_zones = {}
+            self.zone_movement_history = []
+            
+            # Note: We don't reset active cycles as they might be valid for the new symbol
+            # The user should handle cycle management when changing symbols
+            
+            logger.info(f"✅ Symbol-specific state reset for {self.symbol}")
+            
+        except Exception as e:
+            logger.error(f"❌ Error resetting symbol-specific state: {str(e)}")
+
+    def _update_metatrader_symbol_info(self):
+        """Update MetaTrader symbol information for the new symbol"""
+        try:
+            # Verify symbol is accessible in MetaTrader
+            symbol_info = self.meta_trader.get_symbol_info(self.symbol)
+            if not symbol_info:
+                logger.error(f"❌ Cannot get symbol info for {self.symbol} from MetaTrader")
+                return False
+            
+            # Test bid/ask retrieval
+            bid = self.meta_trader.get_bid(self.symbol)
+            ask = self.meta_trader.get_ask(self.symbol)
+            
+            if bid and ask:
+                logger.info(f"✅ MetaTrader symbol info updated for {self.symbol}: bid={bid}, ask={ask}")
+                return True
+            else:
+                logger.error(f"❌ Cannot get bid/ask for {self.symbol} from MetaTrader")
+                return False
+                
+        except Exception as e:
+            logger.error(f"❌ Error updating MetaTrader symbol info: {str(e)}")
+            return False

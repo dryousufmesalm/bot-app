@@ -106,6 +106,29 @@ class AdvancedCyclesTrader(Strategy):
         self.zone_range_pips = int(config.get("zone_range_pips", 50))
         self.auto_place_cycles=bool(config.get("auto_place_cycles", True))
         self.one_direction_per_candle=bool(config.get("one_direction_per_candle", True))
+        
+        # Update magic number in PocketBase if it has changed
+        self._update_magic_number_if_needed(config)
+
+    def _update_magic_number_if_needed(self, cfg):
+        """Update magic number in PocketBase if it has changed"""
+        try:
+            if 'magic_number' in cfg and cfg['magic_number'] != self.bot.magic_number:
+                # Update magic number in PocketBase
+                if hasattr(self.client, 'update_bot_magic_number'):
+                    result = self.client.update_bot_magic_number(self.bot.id, cfg['magic_number'])
+                    if result:
+                        self.bot.magic_number = cfg['magic_number']
+                        logger.info(f"✅ Magic number updated to {cfg['magic_number']} in PocketBase")
+                        self.meta_trader.magic_number = cfg['magic_number']
+                        logger.info(f"✅ Magic number set on MetaTrader instance")
+                    else:
+                        logger.error(f"❌ Failed to update magic number in PocketBase")
+                else:
+                    logger.warning(f"⚠️ Client does not support update_bot_magic_number method")
+        except Exception as e:
+            logger.error(f"❌ Error updating magic number: {str(e)}")
+
     def _initialize_advanced_components(self):
         """Initialize advanced trading components"""
         # Multi-cycle management

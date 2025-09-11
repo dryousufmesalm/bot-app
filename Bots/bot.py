@@ -137,6 +137,12 @@ class Bot:
                         # Call the method directly since it's not async
                         self.strategy._initialize_strategy_configuration(self.configs)
                         print(f"Successfully updated MoveGuard configuration")
+                        
+                        # Update bot symbol if it changed
+                        if 'symbol' in self.configs and self.configs['symbol'] != self.symbol:
+                            old_symbol = self.symbol
+                            self.symbol = self.configs['symbol']
+                            print(f"✅ Bot symbol updated from {old_symbol} to {self.symbol}")
                     except Exception as e:
                         print(f"Failed to update MoveGuard configuration: {e}")
                 else:

@@ -18,6 +18,7 @@ def parse_arguments():
     """Parse command line arguments"""
     parser = argparse.ArgumentParser(description='Update bot configuration')
     parser.add_argument('bot_id', help='Bot ID to update')
+    parser.add_argument('--symbol', help='Trading symbol (e.g., EURUSD, GBPUSD)')
     parser.add_argument('--zone-threshold', type=float, help='Zone threshold in pips')
     parser.add_argument('--order-interval', type=float, help='Order interval in pips')
     parser.add_argument('--lot-size', type=float, help='Lot size')
@@ -129,6 +130,8 @@ def main():
             return False
     
     # Add command line arguments
+    if args.symbol is not None:
+        config_updates["symbol"] = args.symbol
     if args.zone_threshold is not None:
         config_updates["zone_threshold_pips"] = args.zone_threshold
     if args.order_interval is not None:
