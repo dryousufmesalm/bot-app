@@ -179,6 +179,17 @@ class MoveGuard(Strategy):
         self.last_price_update_time = 0
         self.price_movement_threshold = 0.0001  # Minimum price change to trigger updates
         self.market_hours_enabled = bool(cfg.get("market_hours_enabled", True))
+        
+        # Advanced optimization systems
+        self.batch_update_queue = []  # Queue for batch database updates
+        self.batch_update_interval = float(cfg.get("batch_update_interval", 10.0))  # Process batch updates every N seconds
+        self.last_batch_update_time = 0
+        self.cache = {}  # Simple cache for frequently accessed data
+        self.cache_ttl = float(cfg.get("cache_ttl", 30.0))  # Cache time-to-live in seconds
+        self.processing_throttle = {}  # Per-cycle processing throttling
+        self.cycle_process_interval = float(cfg.get("cycle_process_interval", 2.0))  # Process each cycle every N seconds
+        self.database_update_interval = float(cfg.get("database_update_interval", 5.0))  # Database update throttling interval
+        self.optimization_enabled = bool(cfg.get("optimization_enabled", True))  # Enable/disable optimizations
 
     def _initialize_advanced_components(self):
         """Initialize advanced components for MoveGuard"""
@@ -1628,11 +1639,26 @@ class MoveGuard(Strategy):
             # Get active cycles
             active_cycles = self.multi_cycle_manager.get_all_active_cycles()
             
-            # Update all cycles with current profit data from MetaTrader
-            self._update_all_cycles_profit_from_mt5()
-            
-            # Update database with latest profit data
+            # Filter cycles that need processing (smart filtering)
+            cycles_to_process = []
             for cycle in active_cycles:
+                if self._should_process_cycle(cycle):
+                    cycles_to_process.append(cycle)
+            
+            if not cycles_to_process:
+                logger.debug("📊 No cycles need processing at this time")
+                return
+            
+            logger.debug(f"🔄 Processing {len(cycles_to_process)} out of {len(active_cycles)} active cycles")
+            
+            # Update filtered cycles with current profit data from MetaTrader
+            self._update_cycles_profit_from_mt5(cycles_to_process)
+            
+            # Process batch updates if needed
+            self._process_batch_updates()
+            
+            # Update database with latest profit data (throttled)
+            for cycle in cycles_to_process:
                 try:
                     self._update_cycle_in_database(cycle)
                 except Exception as e:
@@ -2074,6 +2100,48 @@ class MoveGuard(Strategy):
             logger.error(f"❌ Error checking price movement: {str(e)}")
             return True  # Default to process if there's an error
 
+    def _get_cached_data(self, key: str, default=None):
+        """Get data from cache with TTL check"""
+        try:
+            if key in self.cache:
+                data, timestamp = self.cache[key]
+                if datetime.datetime.now().timestamp() - timestamp < self.cache_ttl:
+                    return data
+                else:
+                    # Cache expired, remove it
+                    del self.cache[key]
+            return default
+        except Exception as e:
+            logger.error(f"❌ Error getting cached data: {str(e)}")
+            return default
+
+    def _set_cached_data(self, key: str, data):
+        """Set data in cache with timestamp"""
+        try:
+            self.cache[key] = (data, datetime.datetime.now().timestamp())
+        except Exception as e:
+            logger.error(f"❌ Error setting cached data: {str(e)}")
+
+    def _should_process_cycle(self, cycle) -> bool:
+        """Check if cycle should be processed based on throttling"""
+        try:
+            if not self.optimization_enabled:
+                return True  # Skip throttling if optimization is disabled
+            
+            cycle_id = getattr(cycle, 'cycle_id', 'unknown')
+            current_time = datetime.datetime.now().timestamp()
+            last_process_time = self.processing_throttle.get(cycle_id, 0)
+            
+            if current_time - last_process_time >= self.cycle_process_interval:
+                self.processing_throttle[cycle_id] = current_time
+                return True
+            
+            return False
+            
+        except Exception as e:
+            logger.error(f"❌ Error checking cycle processing: {str(e)}")
+            return True  # Default to process if there's an error
+
     def _get_pip_value(self) -> float:
         """Get pip value for MoveGuard"""
         try:
@@ -2091,20 +2159,103 @@ class MoveGuard(Strategy):
         self.last_grid_price = price
         logger.info(f"📊 MoveGuard entry price set to {price}")
 
+    # ==================== BATCH UPDATE SYSTEM ====================
+    
+    def _add_to_batch_queue(self, cycle, use_snapshot: bool = False, snapshot: dict = None):
+        """Add cycle to batch update queue"""
+        try:
+            cycle_id = getattr(cycle, 'cycle_id', 'unknown')
+            # Check if cycle is already in queue
+            for item in self.batch_update_queue:
+                if item.get('cycle_id') == cycle_id:
+                    # Update existing entry
+                    item['cycle'] = cycle
+                    item['use_snapshot'] = use_snapshot
+                    item['snapshot'] = snapshot
+                    item['timestamp'] = datetime.datetime.now().timestamp()
+                    return
+            
+            # Add new entry to queue
+            self.batch_update_queue.append({
+                'cycle_id': cycle_id,
+                'cycle': cycle,
+                'use_snapshot': use_snapshot,
+                'snapshot': snapshot,
+                'timestamp': datetime.datetime.now().timestamp()
+            })
+            
+        except Exception as e:
+            logger.error(f"❌ Error adding cycle to batch queue: {str(e)}")
+
+    def _process_batch_updates(self, force: bool = False):
+        """Process all queued batch updates"""
+        try:
+            if not self.batch_update_queue:
+                return
+            
+            current_time = datetime.datetime.now().timestamp()
+            
+            # Check if it's time to process batch updates (unless forced)
+            if not force and current_time - self.last_batch_update_time < self.batch_update_interval:
+                return
+            
+            logger.info(f"🔄 Processing {len(self.batch_update_queue)} batch database updates")
+            
+            # Process all queued updates
+            successful_updates = 0
+            failed_updates = 0
+            
+            for item in self.batch_update_queue:
+                try:
+                    cycle = item['cycle']
+                    use_snapshot = item['use_snapshot']
+                    snapshot = item['snapshot']
+                    
+                    # Update cycle statistics before database update
+                    self._update_cycle_statistics_with_profit(cycle)
+                    
+                    cycle_data = self._prepare_cycle_data_for_database(cycle, use_snapshot, snapshot)
+                    
+                    if self._validate_cycle_data_before_update(cycle_data):
+                        success = self.client.update_MG_cycle_by_id(cycle.cycle_id, cycle_data)
+                        if success:
+                            successful_updates += 1
+                            cycle._last_db_update_time = current_time
+                        else:
+                            failed_updates += 1
+                    else:
+                        failed_updates += 1
+                        
+                except Exception as e:
+                    logger.error(f"❌ Error processing batch update for cycle {item.get('cycle_id', 'unknown')}: {str(e)}")
+                    failed_updates += 1
+            
+            logger.info(f"✅ Batch update completed: {successful_updates} successful, {failed_updates} failed")
+            
+            # Clear the queue
+            self.batch_update_queue.clear()
+            self.last_batch_update_time = current_time
+            
+        except Exception as e:
+            logger.error(f"❌ Error processing batch updates: {str(e)}")
+
     # ==================== DATABASE OPERATIONS ====================
 
     def _update_cycle_in_database(self, cycle, use_snapshot: bool = False, snapshot: dict = None, force_update: bool = False):
-        """Update cycle in database for MoveGuard with throttling"""
+        """Update cycle in database for MoveGuard with throttling and batching"""
         try:
-            # Throttle database updates to reduce load
-            if not force_update:
+            # Throttle database updates to reduce load (unless forced or cycle is closing)
+            cycle_is_closing = getattr(cycle, 'is_closed', False) or getattr(cycle, 'status', '') == 'closed'
+            
+            if not force_update and not cycle_is_closing and self.optimization_enabled:
                 current_time = datetime.datetime.now().timestamp()
                 last_update = getattr(cycle, '_last_db_update_time', 0)
-                update_interval = 5.0  # Update database at most every 5 seconds
                 
-                if current_time - last_update < update_interval:
-                    logger.debug(f"⏱️ Throttling database update for cycle {cycle.cycle_id} (last update: {current_time - last_update:.1f}s ago)")
-                    return True  # Skip update but return success
+                if current_time - last_update < self.database_update_interval:
+                    # Add to batch queue instead of skipping
+                    self._add_to_batch_queue(cycle, use_snapshot, snapshot)
+                    logger.debug(f"⏱️ Added cycle {cycle.cycle_id} to batch queue (last update: {current_time - last_update:.1f}s ago)")
+                    return True  # Skip immediate update but queue for batch
             
             # Update cycle statistics before database update
             self._update_cycle_statistics_with_profit(cycle)
@@ -3163,8 +3314,8 @@ class MoveGuard(Strategy):
             cycle.total_profit_pips = self._calculate_cycle_total_profit_pips(cycle, self._get_current_price())
             cycle.total_profit_dollars = self._calculate_cycle_total_profit_dollars(cycle, self._get_current_price())
             
-            # Update database
-            self._update_cycle_in_database(cycle)
+            # Update database - force immediate update when closing
+            self._update_cycle_in_database(cycle, force_update=True)
             
             # Remove cycle from manager locally
             try:
@@ -3331,7 +3482,8 @@ class MoveGuard(Strategy):
                         c.close_reason = "Manual close request"
                         c.updated_at = datetime.datetime.now().isoformat()
                         try:
-                            self._update_cycle_in_database(c)
+                            # Force immediate database update when closing cycles
+                            self._update_cycle_in_database(c, force_update=True)
                         except Exception as e:
                             logger.error(f"❌ Error updating cycle {getattr(c,'cycle_id','unknown')} in database: {e}")
                         successes += 1
@@ -3341,6 +3493,9 @@ class MoveGuard(Strategy):
                 
                 # Remove all cycles from active cycles list
                 self.multi_cycle_manager.clear_all_cycles()
+                
+                # Force process any remaining batch updates immediately
+                self._process_batch_updates(force=True)
                 
                 logger.info(f"✅ Closed {successes}/{len(active_cycles)} cycles and removed from active list (close_all request)")
                 return successes > 0
@@ -3374,7 +3529,8 @@ class MoveGuard(Strategy):
                     cycle.close_reason = "Manual close request"
                     cycle.updated_at = datetime.datetime.now().isoformat()
                     try:
-                        self._update_cycle_in_database(cycle)
+                        # Force immediate database update when closing cycles
+                        self._update_cycle_in_database(cycle, force_update=True)
                     except Exception as e:
                         logger.error(f"❌ Error updating cycle {getattr(cycle,'cycle_id','unknown')} in database: {e}")
                     
@@ -3839,6 +3995,28 @@ class MoveGuard(Strategy):
             
         except Exception as e:
             logger.error(f"❌ Error updating all cycles profit from MetaTrader: {str(e)}")
+
+    def _update_cycles_profit_from_mt5(self, cycles):
+        """Update specific cycles with current profit data from MetaTrader (optimized)"""
+        try:
+            if not cycles:
+                return
+            
+            updated_cycles = 0
+            
+            for cycle in cycles:
+                try:
+                    self._update_cycle_orders_profit_from_mt5(cycle)
+                    updated_cycles += 1
+                except Exception as cycle_error:
+                    logger.error(f"❌ Error updating profit for cycle {getattr(cycle, 'cycle_id', 'unknown')}: {str(cycle_error)}")
+                    continue
+            
+            if updated_cycles > 0:
+                logger.debug(f"✅ Updated profit data for {updated_cycles}/{len(cycles)} filtered cycles")
+                    
+        except Exception as e:
+            logger.error(f"❌ Error updating cycles profit: {str(e)}")
 
     def get_total_active_profit_from_mt5(self) -> float:
         """Get total profit for all active cycles combined from MetaTrader"""
