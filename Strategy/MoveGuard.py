@@ -1647,6 +1647,8 @@ class MoveGuard(Strategy):
             
             if not cycles_to_process:
                 logger.debug("📊 No cycles need processing at this time")
+                # Still check for interval-based cycle creation even if no cycles to process
+                await self._check_cycle_intervals(current_price)
                 return
             
             logger.debug(f"🔄 Processing {len(cycles_to_process)} out of {len(active_cycles)} active cycles")
@@ -3494,6 +3496,13 @@ class MoveGuard(Strategy):
                 # Remove all cycles from active cycles list
                 self.multi_cycle_manager.clear_all_cycles()
                 
+                # Clear active cycle levels to ensure clean state
+                self.active_cycle_levels.clear()
+                logger.info("🧹 Cleared active cycle levels for fresh start")
+                
+                # Keep last_cycle_price to maintain price level reference for auto cycle placement
+                logger.info("🔄 Keeping last_cycle_price for immediate auto cycle placement after close all")
+                
                 # Force process any remaining batch updates immediately
                 self._process_batch_updates(force=True)
                 
@@ -4300,8 +4309,13 @@ class MoveGuard(Strategy):
                 calculated_trailing_sl = highest_buy_price - zone_threshold
                 
                 # Apply zone boundary constraint: SL should not be below zone top
+                # Special handling for "NO_MOVE" mode with BUY cycles
+                if self.zone_movement_mode == 'NO_MOVE' and cycle.direction == 'BUY':
+                    # In NO_MOVE mode, keep trailing SL fixed at top boundary
+                    new_trailing_sl = upper
+                    logger.info(f"🎯 NO_MOVE mode: Trailing SL fixed at zone top for BUY cycle {cycle.cycle_id}: {new_trailing_sl:.5f}")
                 # Special handling for "Move Down Only" mode with BUY cycles
-                if self.zone_movement_mode == 'Move Down Only' and cycle.direction == 'BUY':
+                elif self.zone_movement_mode == 'Move Down Only' and cycle.direction == 'BUY':
                     # In Move Down Only mode, keep trailing SL at top boundary to prevent infinite loop
                     new_trailing_sl = upper
                     logger.info(f"🎯 Move Down Only mode: Trailing SL fixed at zone top for BUY cycle {cycle.cycle_id}: {new_trailing_sl:.5f}")
@@ -4356,8 +4370,13 @@ class MoveGuard(Strategy):
                 calculated_trailing_sl = lowest_sell_price + zone_threshold
                 
                 # Apply zone boundary constraint: SL should not be above zone bottom
+                # Special handling for "NO_MOVE" mode with SELL cycles
+                if self.zone_movement_mode == 'NO_MOVE' and cycle.direction == 'SELL':
+                    # In NO_MOVE mode, keep trailing SL fixed at bottom boundary
+                    new_trailing_sl = lower
+                    logger.info(f"🎯 NO_MOVE mode: Trailing SL fixed at zone bottom for SELL cycle {cycle.cycle_id}: {new_trailing_sl:.5f}")
                 # Special handling for "Move Up Only" mode with SELL cycles
-                if self.zone_movement_mode == 'Move Up Only' and cycle.direction == 'SELL':
+                elif self.zone_movement_mode == 'Move Up Only' and cycle.direction == 'SELL':
                     # In Move Up Only mode, keep trailing SL at bottom boundary to prevent infinite loop
                     new_trailing_sl = lower
                     logger.info(f"🎯 Move Up Only mode: Trailing SL fixed at zone bottom for SELL cycle {cycle.cycle_id}: {new_trailing_sl:.5f}")
@@ -4600,9 +4619,10 @@ class MoveGuard(Strategy):
             for cycle in active_cycles:
                 # Check if cycle is at the same price level with appropriate tolerance
                 if abs(cycle.entry_price - price_level) <= tolerance:
-                    # Remove direction filtering - detect any cycle at this price level
-                    cycles_at_level.append(cycle)
-                    logger.debug(f"Found cycle {cycle.cycle_id} at level {price_level} (entry_price: {cycle.entry_price}, direction: {cycle.direction}, tolerance: {tolerance})")
+                    # Filter by direction if specified
+                    if direction is None or cycle.direction == direction:
+                        cycles_at_level.append(cycle)
+                        logger.debug(f"Found cycle {cycle.cycle_id} at level {price_level} (entry_price: {cycle.entry_price}, direction: {cycle.direction}, tolerance: {tolerance})")
             
             return cycles_at_level
         except Exception as e:
@@ -4610,7 +4630,7 @@ class MoveGuard(Strategy):
             return []
 
     def _has_cycle_at_level(self, price_level, direction=None):
-        """Check if there's already a cycle at the specified price level"""
+        """Check if there's already a cycle at the specified price level with the same direction"""
         try:
             cycles_at_level = self._get_cycles_at_level(price_level, direction)
             return len(cycles_at_level) > 0
@@ -4682,13 +4702,24 @@ class MoveGuard(Strategy):
         try:
             if not current_price:
                 return
-            if not hasattr(self, 'last_cycle_price'):
+            if not hasattr(self, 'last_cycle_price') or self.last_cycle_price is None:
+                # Try to get last cycle price from database, but if none exists, use current price
                 self.last_cycle_price = self._get_last_cycle_price()
-                return
+                if self.last_cycle_price is None:
+                    # No previous cycles exist, use current price as starting point
+                    self.last_cycle_price = current_price
+                    logger.info(f"🔄 No previous cycles found, using current price {current_price:.5f} as starting point for auto cycle placement")
+                    # Don't return here - continue to process cycle creation on next price movement
+                    return
+                # Continue processing with the retrieved last_cycle_price
             # Calculate the current price level
             next_up_level, next_down_level = self._calculate_price_level()
             current_level = next_up_level if current_price > self.last_cycle_price else next_down_level
             direction = "BUY" if current_price > self.last_cycle_price else "SELL"
+            
+            # Debug logging for cycle creation
+            logger.debug(f"🔍 Cycle interval check: current_price={current_price:.5f}, last_cycle_price={self.last_cycle_price:.5f}, "
+                        f"direction={direction}, current_level={current_level:.5f}, next_up={next_up_level:.5f}, next_down={next_down_level:.5f}")
             
             
             
@@ -4717,30 +4748,31 @@ class MoveGuard(Strategy):
                 self.last_cycle_price = current_price
                 return
             
-            # Check if we already have a cycle at this level using improved method
-            has_existing_cycle = self._has_cycle_at_level(current_level, direction)
-            is_level_active = self._is_level_active(current_level)
+            # Check if we already have a cycle of this direction at this level
+            has_existing_cycle_same_direction = self._has_cycle_at_level(current_level, direction)
             
             # Enhanced logging for debugging cycle creation decisions
             logger.debug(f"🔍 Cycle creation check: level={current_level:.5f}, direction={direction}, "
-                        f"has_existing_cycle={has_existing_cycle}, is_level_active={is_level_active}, "
+                        f"has_existing_cycle_same_direction={has_existing_cycle_same_direction}, "
                         f"last_cycle_price={self.last_cycle_price:.5f}")
             
-            if not has_existing_cycle and not is_level_active:
-                # Additional validation: ensure we're not creating cycles too close to existing ones
+            if not has_existing_cycle_same_direction:
+                # Additional validation: ensure we're not creating cycles too close to existing ones of the same direction
                 min_distance = self.cycle_interval * self._get_pip_value() * 0.8  # 80% of cycle interval
                 too_close = False
                 
                 for cycle in active_cycles:
-                    distance = abs(cycle.entry_price - current_level)
-                    if distance < min_distance:
-                        too_close = True
-                        logger.debug(f"🚫 Skipping cycle creation at {current_level:.5f} - too close to existing cycle at {cycle.entry_price:.5f} (distance: {distance:.5f})")
-                        break
+                    # Only check distance for cycles of the same direction
+                    if cycle.direction == direction:
+                        distance = abs(cycle.entry_price - current_level)
+                        if distance < min_distance:
+                            too_close = True
+                            logger.debug(f"🚫 Skipping cycle creation at {current_level:.5f} - too close to existing {direction} cycle at {cycle.entry_price:.5f} (distance: {distance:.5f})")
+                            break
                 
                 if not too_close:
                     logger.info(f"🔄 No existing cycle found at level {current_level:.5f} for {direction} direction - creating new cycle")
-                    # Create new cycle with initial order
+                    # Create new cycle with initial order based on price movement direction
                     success = await self._create_interval_cycle_sync(direction, current_level)
                     if success:
                         # Add level to active tracking
