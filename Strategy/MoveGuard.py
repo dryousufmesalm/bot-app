@@ -1821,7 +1821,16 @@ class MoveGuard(Strategy):
                     
                     # Remove SL from initial entry order after first grid order is placed
                     if grid_level == 1:  # When placing level 1, remove SL from level 0 (initial entry)
-                        self._remove_sl_from_first_order(cycle)
+                        # Check if SL has already been removed to prevent infinite loop
+                        initial_order = None
+                        for o in getattr(cycle, 'active_orders', []):
+                            if o.get('status') == 'active' and o.get('is_grid', False) and o.get('grid_level') == 0:
+                                initial_order = o
+                                break
+                        
+                        # Only call remove SL method if we haven't already marked it as removed
+                        if initial_order and not initial_order.get('sl_removed', False):
+                            self._remove_sl_from_first_order(cycle)
                 # Enforce initial order SL logic without closing cycle
                 self._check_and_close_initial_order(cycle, current_price)
 
@@ -1951,10 +1960,26 @@ class MoveGuard(Strategy):
             if initial_order:
                 ticket = initial_order.get('order_id') or initial_order.get('ticket')
                 if ticket:
-                    self.meta_trader.modify_position_sl_tp(int(ticket), sl=0.0, tp=0.0)
-                    logger.info(f"Removed SL from initial entry order (grid_level 0) ticket {ticket}")
+                    # Check current SL/TP from MT5 before attempting modification
+                    position = self.meta_trader.get_position_by_ticket(int(ticket))
+                    if position:
+                        current_sl = position.get('sl', 0.0)
+                        current_tp = position.get('tp', 0.0)
+                        
+                        # Only modify if SL or TP are not already 0.0 to prevent infinite loop
+                        if current_sl != 0.0 or current_tp != 0.0:
+                            self.meta_trader.modify_position_sl_tp(int(ticket), sl=0.0, tp=0.0)
+                            logger.info(f"✅ Removed SL/TP from initial entry order (grid_level 0) ticket {ticket} - SL: {current_sl}→0.0, TP: {current_tp}→0.0")
+                            # Mark that SL has been removed to prevent repeated attempts
+                            initial_order['sl_removed'] = True
+                        else:
+                            logger.debug(f"🔍 Initial entry order (grid_level 0) ticket {ticket} already has SL=0.0 and TP=0.0 - no modification needed")
+                            # Mark that SL has been removed to prevent repeated attempts
+                            initial_order['sl_removed'] = True
+                    else:
+                        logger.warning(f"⚠️ Could not find position for ticket {ticket} in MT5")
         except Exception as e:
-            logger.error(f"Error removing SL from first order: {e}")
+            logger.error(f"❌ Error removing SL from first order: {e}")
 
     def _check_and_close_initial_order(self, cycle, current_price: float):
         """Close the cycle entry order if price hits its implicit SL threshold; keep cycle open."""
@@ -4380,6 +4405,7 @@ class MoveGuard(Strategy):
                     # In Move Up Only mode, keep trailing SL at bottom boundary to prevent infinite loop
                     new_trailing_sl = lower
                     logger.info(f"🎯 Move Up Only mode: Trailing SL fixed at zone bottom for SELL cycle {cycle.cycle_id}: {new_trailing_sl:.5f}")
+                    logger.info(f"🔍 DEBUG: lowest_sell_price={lowest_sell_price:.5f}, zone_threshold={zone_threshold:.5f}, calculated_trailing_sl={calculated_trailing_sl:.5f}, lower_boundary={lower:.5f}")
                 elif calculated_trailing_sl > lower:
                     new_trailing_sl = lower
                     logger.info(f"🎯 Trailing SL constrained to zone bottom for SELL cycle {cycle.cycle_id}: calculated={calculated_trailing_sl:.5f}, constrained={new_trailing_sl:.5f}")
@@ -4428,6 +4454,7 @@ class MoveGuard(Strategy):
             elif cycle.direction == 'SELL':
                 if current_price >= cycle.trailing_stop_loss:
                     logger.info(f"🎯 Trailing SL hit for SELL cycle {cycle.cycle_id}: price {current_price:.5f} >= SL {cycle.trailing_stop_loss:.5f}")
+                    logger.info(f"🔍 DEBUG TSL: zone_movement_mode={self.zone_movement_mode}, lower_boundary={cycle.zone_data.get('lower_boundary', 0.0):.5f}, upper_boundary={cycle.zone_data.get('upper_boundary', 0.0):.5f}")
                     return True
             
             return False
@@ -4471,20 +4498,21 @@ class MoveGuard(Strategy):
                 # Update zone data
                 if not hasattr(cycle, 'zone_data') or not cycle.zone_data:
                     cycle.zone_data = {}
-                    
-                    cycle.zone_data.update({
-                        'base_price': (new_top + new_bottom) / 2,
-                        'upper_boundary': new_top,
-                        'lower_boundary': new_bottom,
-                        'last_movement': {
-                            'direction': 'TRAILING_SL_BUY',
-                            'old_base': cycle.zone_data.get('base_price'),
-                            'new_base': (new_top + new_bottom) / 2,
-                            'highest_buy': new_top,
-                            'trailing_sl': new_bottom,
-                            'timestamp': datetime.datetime.now().isoformat()
-                        }
-                    })
+                
+                old_base = cycle.zone_data.get('base_price', (new_top + new_bottom) / 2)
+                cycle.zone_data.update({
+                    'base_price': (new_top + new_bottom) / 2,
+                    'upper_boundary': new_top,
+                    'lower_boundary': new_bottom,
+                    'last_movement': {
+                        'direction': 'TRAILING_SL_BUY',
+                        'old_base': old_base,
+                        'new_base': (new_top + new_bottom) / 2,
+                        'highest_buy': new_top,
+                        'trailing_sl': new_bottom,
+                        'timestamp': datetime.datetime.now().isoformat()
+                    }
+                })
                 
                  # Close all active BUY orders
                 asyncio.create_task(self._close_all_cycle_orders(cycle))
@@ -4523,20 +4551,21 @@ class MoveGuard(Strategy):
                 # Update zone data
                 if not hasattr(cycle, 'zone_data') or not cycle.zone_data:
                     cycle.zone_data = {}
-                    
-                    cycle.zone_data.update({
-                        'base_price': (new_top + new_bottom) / 2,
-                        'upper_boundary': new_top,
-                        'lower_boundary': new_bottom,
-                        'last_movement': {
-                            'direction': 'TRAILING_SL_SELL',
-                            'old_base': cycle.zone_data.get('base_price'),
-                            'new_base': (new_top + new_bottom) / 2,
-                            'lowest_sell': new_bottom,
-                            'trailing_sl': new_top,
-                            'timestamp': datetime.datetime.now().isoformat()
-                        }
-                    })
+                
+                old_base = cycle.zone_data.get('base_price', (new_top + new_bottom) / 2)
+                cycle.zone_data.update({
+                    'base_price': (new_top + new_bottom) / 2,
+                    'upper_boundary': new_top,
+                    'lower_boundary': new_bottom,
+                    'last_movement': {
+                        'direction': 'TRAILING_SL_SELL',
+                        'old_base': old_base,
+                        'new_base': (new_top + new_bottom) / 2,
+                        'lowest_sell': new_bottom,
+                        'trailing_sl': new_top,
+                        'timestamp': datetime.datetime.now().isoformat()
+                    }
+                })
                 
                # Close all active SELL orders
                 asyncio.create_task(self._close_all_cycle_orders(cycle))
