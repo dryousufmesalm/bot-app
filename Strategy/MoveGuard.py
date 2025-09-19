@@ -1251,8 +1251,26 @@ class MoveGuard(Strategy):
             # Create cycle object for MoveGuard
             cycle = MoveGuardCycle(cycle_data, self.meta_trader, self.bot)
             
-            # Add to multi-cycle manager
-            self.multi_cycle_manager.add_cycle(cycle)
+            # MANUAL CYCLE DUPLICATE CHECK: Check for existing cycles at same price and direction
+            cycle_entry_price = getattr(cycle, 'entry_price', None)
+            if cycle_entry_price is not None:
+                active_cycles = self.multi_cycle_manager.get_all_active_cycles()
+                for existing_cycle in active_cycles:
+                    existing_entry_price = getattr(existing_cycle, 'entry_price', None)
+                    existing_direction = getattr(existing_cycle, 'direction', None)
+                    
+                    if (existing_entry_price is not None and 
+                        existing_direction == direction and
+                        abs(existing_entry_price - cycle_entry_price) < 0.00001):  # Exact match
+                        
+                        logger.warning(f"🚫 MANUAL CYCLE DUPLICATE PREVENTION: Cycle at price {cycle_entry_price} direction {direction} "
+                                      f"already exists as cycle {existing_cycle.cycle_id} at price {existing_entry_price}")
+                        return False
+            
+            # Add to multi-cycle manager (which also has duplicate checking)
+            if not self.multi_cycle_manager.add_cycle(cycle):
+                logger.warning(f"🚫 Failed to add cycle {cycle.cycle_id} to multi-cycle manager (likely duplicate)")
+                return False
             
             # Create cycle in database first
             try:
@@ -1819,18 +1837,6 @@ class MoveGuard(Strategy):
                             cycle.trailing_stop_loss = min(cycle.trailing_stop_loss, lower)
                             continue
                     
-                    # Remove SL from initial entry order after first grid order is placed
-                    if grid_level == 1:  # When placing level 1, remove SL from level 0 (initial entry)
-                        # Check if SL has already been removed to prevent infinite loop
-                        initial_order = None
-                        for o in getattr(cycle, 'active_orders', []):
-                            if o.get('status') == 'active' and o.get('is_grid', False) and o.get('grid_level') == 0:
-                                initial_order = o
-                                break
-                        
-                        # Only call remove SL method if we haven't already marked it as removed
-                        if initial_order and not initial_order.get('sl_removed', False):
-                            self._remove_sl_from_first_order(cycle)
                 # Enforce initial order SL logic without closing cycle
                 self._check_and_close_initial_order(cycle, current_price)
 
@@ -1939,47 +1945,6 @@ class MoveGuard(Strategy):
             logger.error(f"❌ Error placing initial order: {e}")
             return False
 
-    def _remove_sl_from_first_order(self, cycle):
-        """Remove SL from the initial entry order (grid_level 0) after first grid order is placed."""
-        try:
-            # Remove SL from the initial entry order (grid_level 0)
-            initial_order = None
-            # Prefer grid_data grid_orders if present
-            grid_orders = []
-            gd = getattr(cycle, 'grid_data', {}) or {}
-            if isinstance(gd, dict):
-                grid_orders = gd.get('grid_orders', []) if isinstance(gd.get('grid_orders'), list) else []
-            # Search for the initial entry order (grid_level 0)
-            for o in getattr(cycle, 'active_orders', []):
-                if o.get('status') == 'active' and o.get('is_grid', False) and o.get('grid_level') == 0:
-                    initial_order = o
-                    break
-            if not initial_order and len(grid_orders) > 0:
-                # Take grid_0 (index 0) - the initial entry order
-                initial_order = grid_orders[0] if len(grid_orders) > 0 else None
-            if initial_order:
-                ticket = initial_order.get('order_id') or initial_order.get('ticket')
-                if ticket:
-                    # Check current SL/TP from MT5 before attempting modification
-                    position = self.meta_trader.get_position_by_ticket(int(ticket))
-                    if position:
-                        current_sl = position.get('sl', 0.0)
-                        current_tp = position.get('tp', 0.0)
-                        
-                        # Only modify if SL or TP are not already 0.0 to prevent infinite loop
-                        if current_sl != 0.0 or current_tp != 0.0:
-                            self.meta_trader.modify_position_sl_tp(int(ticket), sl=0.0, tp=0.0)
-                            logger.info(f"✅ Removed SL/TP from initial entry order (grid_level 0) ticket {ticket} - SL: {current_sl}→0.0, TP: {current_tp}→0.0")
-                            # Mark that SL has been removed to prevent repeated attempts
-                            initial_order['sl_removed'] = True
-                        else:
-                            logger.debug(f"🔍 Initial entry order (grid_level 0) ticket {ticket} already has SL=0.0 and TP=0.0 - no modification needed")
-                            # Mark that SL has been removed to prevent repeated attempts
-                            initial_order['sl_removed'] = True
-                    else:
-                        logger.warning(f"⚠️ Could not find position for ticket {ticket} in MT5")
-        except Exception as e:
-            logger.error(f"❌ Error removing SL from first order: {e}")
 
     def _check_and_close_initial_order(self, cycle, current_price: float):
         """Close the cycle entry order if price hits its implicit SL threshold; keep cycle open."""
@@ -4777,15 +4742,26 @@ class MoveGuard(Strategy):
                 self.last_cycle_price = current_price
                 return
             
-            # Check if we already have a cycle of this direction at this level
+            # ATOMIC CHECK: Double-check for existing cycles with exact price matching
             has_existing_cycle_same_direction = self._has_cycle_at_level(current_level, direction)
+            
+            # Additional atomic check: verify no cycles exist at exact same price and direction
+            exact_duplicate_exists = False
+            for cycle in active_cycles:
+                if (hasattr(cycle, 'entry_price') and hasattr(cycle, 'direction') and
+                    cycle.direction == direction and 
+                    abs(cycle.entry_price - current_level) < 0.00001):  # Exact match
+                    exact_duplicate_exists = True
+                    logger.warning(f"🚫 ATOMIC CHECK: Exact duplicate cycle found at {current_level:.5f} direction {direction}")
+                    break
             
             # Enhanced logging for debugging cycle creation decisions
             logger.debug(f"🔍 Cycle creation check: level={current_level:.5f}, direction={direction}, "
                         f"has_existing_cycle_same_direction={has_existing_cycle_same_direction}, "
+                        f"exact_duplicate_exists={exact_duplicate_exists}, "
                         f"last_cycle_price={self.last_cycle_price:.5f}")
             
-            if not has_existing_cycle_same_direction:
+            if not has_existing_cycle_same_direction and not exact_duplicate_exists:
                 # Additional validation: ensure we're not creating cycles too close to existing ones of the same direction
                 min_distance = self.cycle_interval * self._get_pip_value() * 0.8  # 80% of cycle interval
                 too_close = False

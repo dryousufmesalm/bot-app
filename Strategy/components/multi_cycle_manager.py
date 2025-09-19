@@ -90,6 +90,25 @@ class MultiCycleManager:
                     logger.warning(f"Cycle {cycle_id} already exists in manager")
                     return False
                 
+                # CRITICAL FIX: Check for duplicate cycles at same price level and direction
+                cycle_entry_price = getattr(cycle, 'entry_price', None)
+                cycle_direction = getattr(cycle, 'direction', None) or getattr(cycle, 'current_direction', None)
+                
+                if cycle_entry_price is not None and cycle_direction in ["BUY", "SELL"]:
+                    # Check for existing cycles at the same price level and direction
+                    for existing_cycle_id, existing_cycle in self.active_cycles.items():
+                        existing_entry_price = getattr(existing_cycle, 'entry_price', None)
+                        existing_direction = getattr(existing_cycle, 'direction', None) or getattr(existing_cycle, 'current_direction', None)
+                        
+                        # Use exact price matching for duplicate detection
+                        if (existing_entry_price is not None and 
+                            existing_direction == cycle_direction and
+                            abs(existing_entry_price - cycle_entry_price) < 0.00001):  # Exact match with small tolerance
+                            
+                            logger.warning(f"DUPLICATE PREVENTION: Cycle {cycle_id} at price {cycle_entry_price} direction {cycle_direction} "
+                                          f"already exists as cycle {existing_cycle_id} at price {existing_entry_price}")
+                            return False
+                
                 # Check maximum cycles limit
                 if len(self.active_cycles) >= self.max_active_cycles:
                     logger.warning(f"Maximum cycles limit ({self.max_active_cycles}) reached")
