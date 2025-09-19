@@ -1129,13 +1129,16 @@ class MoveGuard(Strategy):
         try:
             logger.info(f"📈 MoveGuard placing BUY order at {current_ask}")
             
+            # Get initial stop loss configuration for interval cycles
+            initial_stop_loss_pips = getattr(self, 'initial_stop_loss_pips', 100.0)
+            
             # Use unified MT5 order placement
             success, order_data = MT5OrderUtils.place_buy_order(
                 meta_trader=self.meta_trader,
                 symbol=self.symbol,
                 lot_size=self.lot_size,  # This will use bot config for new cycles
                 magic_number=self.bot.magic_number,
-                stop_loss_pips=0,
+                stop_loss_pips=initial_stop_loss_pips,  # ✅ Use initial SL config
                 take_profit_pips=0,
                 slippage=50, 
                 comment=comment
@@ -1170,13 +1173,16 @@ class MoveGuard(Strategy):
         try:
             logger.info(f"📉 MoveGuard placing SELL order at {current_bid}")
             
+            # Get initial stop loss configuration for interval cycles
+            initial_stop_loss_pips = getattr(self, 'initial_stop_loss_pips', 100.0)
+            
             # Use unified MT5 order placement
             success, order_data = MT5OrderUtils.place_sell_order(
                 meta_trader=self.meta_trader,
                 symbol=self.symbol,
                 lot_size=self.lot_size,
                 magic_number=self.bot.magic_number,
-                stop_loss_pips=0,
+                stop_loss_pips=initial_stop_loss_pips,  # ✅ Use initial SL config
                 take_profit_pips=0,
                 slippage=50,
                 comment=comment
