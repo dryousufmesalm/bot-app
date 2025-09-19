@@ -1845,6 +1845,9 @@ class MoveGuard(Strategy):
                     
                 # Enforce initial order SL logic without closing cycle
                 self._check_and_close_initial_order(cycle, current_price)
+                
+                # Check and enforce SL for interval cycle orders
+                self._check_and_enforce_interval_order_sl(cycle, current_price)
 
         except Exception as e:
             logger.error(f"❌ Error processing grid logic: {str(e)}")
@@ -1988,6 +1991,133 @@ class MoveGuard(Strategy):
                     logger.info(f"Closed cycle entry order at SL threshold for cycle {cycle.cycle_id}")
         except Exception as e:
             logger.error(f"Error in _check_and_close_initial_order: {e}")
+
+    def _check_and_enforce_interval_order_sl(self, cycle, current_price: float):
+        """Check and enforce SL for interval cycle orders that don't have SL or didn't close by SL."""
+        try:
+            # Get cycle-specific configuration values
+            initial_stop_loss_pips = self.get_cycle_config_value(cycle, 'initial_stop_loss_pips', self.initial_stop_loss_pips)
+            if initial_stop_loss_pips <= 0:
+                return
+            
+            pip_value = self._get_pip_value()
+            
+            # Find active interval cycle orders (grid_level 0, is_initial=True, is_grid=True)
+            interval_orders = []
+            for o in getattr(cycle, 'orders', []):
+                # Handle both dict and tuple formats
+                if isinstance(o, dict):
+                    if (o.get('status') == 'active' and 
+                        o.get('is_initial', False) and 
+                        o.get('is_grid', True) and 
+                        o.get('grid_level', 0) == 0):
+                        interval_orders.append(o)
+                elif isinstance(o, (tuple, list)) and len(o) >= 4:
+                    # Handle tuple format - assume structure: (order_id, status, grid_level, is_initial, ...)
+                    if (len(o) >= 5 and 
+                        o[1] == 'active' and  # status
+                        o[3] == True and      # is_initial
+                        o[2] == 0):           # grid_level
+                        # Convert tuple to dict format for processing
+                        order_dict = {
+                            'order_id': o[0],
+                            'ticket': o[0],
+                            'status': o[1],
+                            'grid_level': o[2],
+                            'is_initial': o[3],
+                            'is_grid': o[4] if len(o) > 4 else True,
+                            'direction': o[5] if len(o) > 5 else 'BUY',
+                            'price': o[6] if len(o) > 6 else 0.0
+                        }
+                        interval_orders.append(order_dict)
+            
+            # Ensure all orders are dictionaries
+            processed_orders = []
+            for order in interval_orders:
+                if isinstance(order, dict):
+                    processed_orders.append(order)
+                else:
+                    logger.warning(f"⚠️ Skipping non-dict order: {type(order)}")
+            interval_orders = processed_orders
+            
+            if not interval_orders:
+                return
+            
+            logger.debug(f"🔍 Checking {len(interval_orders)} interval orders for SL enforcement in cycle {cycle.cycle_id}")
+            
+            for order in interval_orders:
+                try:
+                    # Additional type checking for safety
+                    if not isinstance(order, dict):
+                        logger.warning(f"⚠️ Skipping non-dict order in processing: {type(order)} - {order}")
+                        continue
+                    
+                    order_id = order.get('order_id') or order.get('ticket')
+                    entry_price = order.get('price', 0.0)
+                    direction = order.get('direction', 'BUY')
+                    
+                    if not order_id or entry_price <= 0:
+                        logger.debug(f"⚠️ Skipping order with invalid data: ID={order_id}, Price={entry_price}")
+                        continue
+                    
+                    # Check if order has SL in MT5
+                    position = self.meta_trader.get_position_by_ticket(int(order_id))
+                    has_sl_in_mt5 = False
+                    current_sl = 0.0
+                    
+                    if position:
+                        current_sl = position.get('sl', 0.0)
+                        has_sl_in_mt5 = current_sl != 0.0
+                    
+                    # Calculate expected SL price
+                    if direction == 'BUY':
+                        expected_sl_price = entry_price - (initial_stop_loss_pips * pip_value)
+                        sl_hit = current_price <= expected_sl_price
+                    else:  # SELL
+                        expected_sl_price = entry_price + (initial_stop_loss_pips * pip_value)
+                        sl_hit = current_price >= expected_sl_price
+                    
+                    # Case 1: Order has no SL in MT5 - add SL
+                    if not has_sl_in_mt5:
+                        logger.warning(f"🚨 Interval order {order_id} has no SL in MT5 - adding SL at {expected_sl_price:.5f}")
+                        try:
+                            self.meta_trader.modify_position_sl_tp(int(order_id), sl=expected_sl_price, tp=0.0)
+                            logger.info(f"✅ Added SL to interval order {order_id} at {expected_sl_price:.5f}")
+                        except Exception as e:
+                            logger.error(f"❌ Failed to add SL to interval order {order_id}: {e}")
+                    
+                    # Case 2: Order has SL but price hit SL threshold - close manually
+                    elif has_sl_in_mt5 and sl_hit:
+                        logger.warning(f"🚨 Interval order {order_id} hit SL threshold but not closed - closing manually")
+                        logger.info(f"   Entry: {entry_price:.5f}, Current: {current_price:.5f}, Expected SL: {expected_sl_price:.5f}")
+                        
+                        if self._close_order(order):
+                            order['status'] = 'closed'
+                            order['closed_at'] = datetime.datetime.now().isoformat()
+                            order['closed_reason'] = 'manual_sl_enforcement'
+                            logger.info(f"✅ Manually closed interval order {order_id} due to SL hit")
+                        else:
+                            logger.error(f"❌ Failed to manually close interval order {order_id}")
+                    
+                    # Case 3: Order has SL but it's different from expected - update SL
+                    elif has_sl_in_mt5 and abs(current_sl - expected_sl_price) > 0.00001:
+                        logger.warning(f"🚨 Interval order {order_id} has incorrect SL - updating from {current_sl:.5f} to {expected_sl_price:.5f}")
+                        try:
+                            self.meta_trader.modify_position_sl_tp(int(order_id), sl=expected_sl_price, tp=0.0)
+                            logger.info(f"✅ Updated SL for interval order {order_id} to {expected_sl_price:.5f}")
+                        except Exception as e:
+                            logger.error(f"❌ Failed to update SL for interval order {order_id}: {e}")
+                    
+                    # Log status for debugging
+                    else:
+                        logger.debug(f"✅ Interval order {order_id} SL status OK: SL={current_sl:.5f}, Expected={expected_sl_price:.5f}")
+                        
+                except Exception as order_error:
+                    logger.error(f"❌ Error processing interval order: {order_error}")
+                    continue
+                    
+        except Exception as e:
+            logger.error(f"❌ Error in _check_and_enforce_interval_order_sl: {e}")
 
     def _process_zone_logic(self, current_price: float, market_data: dict, active_cycles: List):
         """Process zone logic for MoveGuard"""
