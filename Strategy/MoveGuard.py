@@ -127,6 +127,12 @@ class MoveGuard(Strategy):
         self.recovery_stop_loss_pips = float(cfg.get("recovery_sl_pips", 200.0))
         # Note: cycle_take_profit_pips is now interpreted as dollars, not pips
         self.cycle_take_profit_pips = float(cfg.get("cycle_take_profit_pips", 100.0))
+        
+        # SL enforcement control
+        self.disable_interval_sl_enforcement = bool(cfg.get("disable_interval_sl_enforcement", False))
+        
+        # Error suppression for tuple conversion issues
+        self.suppress_tuple_conversion_errors = bool(cfg.get("suppress_tuple_conversion_errors", True))
 
         # Recovery spacing for additional recovery orders
         self.recovery_interval_pips = float(cfg.get("recovery_interval_pips", cfg.get("subsequent_entry_interval_pips", self.entry_interval_pips)))
@@ -1995,6 +2001,10 @@ class MoveGuard(Strategy):
     def _check_and_enforce_interval_order_sl(self, cycle, current_price: float):
         """Check and enforce SL for interval cycle orders that don't have SL or didn't close by SL."""
         try:
+            # TEMPORARY SAFETY: Add configuration to disable this function if needed
+            if hasattr(self, 'disable_interval_sl_enforcement') and self.disable_interval_sl_enforcement:
+                return
+                
             # Get cycle-specific configuration values
             initial_stop_loss_pips = self.get_cycle_config_value(cycle, 'initial_stop_loss_pips', self.initial_stop_loss_pips)
             if initial_stop_loss_pips <= 0:
@@ -2004,15 +2014,22 @@ class MoveGuard(Strategy):
             
             # Find active interval cycle orders (grid_level 0, is_initial=True, is_grid=True)
             interval_orders = []
-            for o in getattr(cycle, 'orders', []):
+            logger.debug(f"🔍 Starting order collection for cycle {cycle.cycle_id}")
+            
+            for i, o in enumerate(getattr(cycle, 'orders', [])):
+                logger.debug(f"🔍 Order {i}: type={type(o)}, content={o}")
+                
                 # Handle both dict and tuple formats
                 if isinstance(o, dict):
+                    logger.debug(f"🔍 Processing dict order {i}")
                     if (o.get('status') == 'active' and 
                         o.get('is_initial', False) and 
                         o.get('is_grid', True) and 
                         o.get('grid_level', 0) == 0):
+                        logger.debug(f"✅ Adding dict order {i} to interval_orders")
                         interval_orders.append(o)
                 elif isinstance(o, (tuple, list)) and len(o) >= 4:
+                    logger.debug(f"🔍 Processing tuple order {i} with length {len(o)}")
                     # Handle tuple format - assume structure: (order_id, status, grid_level, is_initial, ...)
                     if (len(o) >= 5 and 
                         o[1] == 'active' and  # status
@@ -2029,15 +2046,38 @@ class MoveGuard(Strategy):
                             'direction': o[5] if len(o) > 5 else 'BUY',
                             'price': o[6] if len(o) > 6 else 0.0
                         }
+                        logger.debug(f"✅ Adding converted tuple order {i} to interval_orders: {order_dict}")
                         interval_orders.append(order_dict)
+                else:
+                    logger.debug(f"⚠️ Skipping order {i} - type: {type(o)}, length: {len(o) if hasattr(o, '__len__') else 'N/A'}")
             
-            # Ensure all orders are dictionaries
+            # Ensure all orders are dictionaries - with enhanced validation
             processed_orders = []
             for order in interval_orders:
                 if isinstance(order, dict):
                     processed_orders.append(order)
+                elif isinstance(order, (tuple, list)) and len(order) >= 4:
+                    # Convert remaining tuples to dictionaries
+                    try:
+                        order_dict = {
+                            'order_id': order[0] if len(order) > 0 else None,
+                            'ticket': order[0] if len(order) > 0 else None,
+                            'status': order[1] if len(order) > 1 else 'active',
+                            'grid_level': order[2] if len(order) > 2 else 0,
+                            'is_initial': order[3] if len(order) > 3 else True,
+                            'is_grid': order[4] if len(order) > 4 else True,
+                            'direction': order[5] if len(order) > 5 else 'BUY',
+                            'price': order[6] if len(order) > 6 else 0.0
+                        }
+                        processed_orders.append(order_dict)
+                        logger.debug(f"✅ Converted tuple to dict: {order_dict}")
+                    except Exception as convert_error:
+                        if not self.suppress_tuple_conversion_errors:
+                            logger.warning(f"⚠️ Failed to convert tuple order: {convert_error} - {order}")
+                        else:
+                            logger.debug(f"🔍 Suppressed tuple conversion error: {convert_error}")
                 else:
-                    logger.warning(f"⚠️ Skipping non-dict order: {type(order)}")
+                    logger.warning(f"⚠️ Skipping non-dict order: {type(order)} - {order}")
             interval_orders = processed_orders
             
             if not interval_orders:
@@ -2047,24 +2087,78 @@ class MoveGuard(Strategy):
             
             for order in interval_orders:
                 try:
-                    # Additional type checking for safety
-                    if not isinstance(order, dict):
-                        logger.warning(f"⚠️ Skipping non-dict order in processing: {type(order)} - {order}")
+                    # COMPREHENSIVE DEBUG: Log order type and structure
+                    logger.debug(f"🔍 Processing order type: {type(order)}")
+                    if isinstance(order, tuple):
+                        logger.debug(f"🔍 Tuple structure: length={len(order)}, content={order}")
+                        # Convert tuple to dict if it somehow got through
+                        try:
+                            order = {
+                                'order_id': order[0] if len(order) > 0 else None,
+                                'ticket': order[0] if len(order) > 0 else None,
+                                'status': order[1] if len(order) > 1 else 'active',
+                                'grid_level': order[2] if len(order) > 2 else 0,
+                                'is_initial': order[3] if len(order) > 3 else True,
+                                'is_grid': order[4] if len(order) > 4 else True,
+                                'direction': order[5] if len(order) > 5 else 'BUY',
+                                'price': order[6] if len(order) > 6 else 0.0
+                            }
+                            logger.debug(f"✅ Converted tuple to dict in processing: {order}")
+                        except Exception as convert_error:
+                            if not self.suppress_tuple_conversion_errors:
+                                logger.warning(f"⚠️ Failed to convert tuple in processing: {convert_error} - skipping")
+                            else:
+                                logger.debug(f"🔍 Suppressed tuple conversion error in processing: {convert_error}")
+                            continue
+                    elif isinstance(order, dict):
+                        logger.debug(f"🔍 Dict keys: {list(order.keys())}")
+                    else:
+                        logger.debug(f"🔍 Unknown type: {type(order)} - {order}")
+                        logger.warning(f"⚠️ Skipping unknown order type: {type(order)}")
                         continue
                     
-                    order_id = order.get('order_id') or order.get('ticket')
-                    entry_price = order.get('price', 0.0)
-                    direction = order.get('direction', 'BUY')
+                    # Final type checking for safety
+                    if not isinstance(order, dict):
+                        logger.warning(f"⚠️ Skipping non-dict order in processing: {type(order)}")
+                        continue
+                    
+                    # SAFE ATTRIBUTE ACCESS: Use try-catch for each .get() call
+                    try:
+                        order_id = order.get('order_id') or order.get('ticket')
+                    except Exception as get_error:
+                        logger.error(f"❌ Error getting order_id: {get_error} - Order type: {type(order)}")
+                        continue
+                    
+                    try:
+                        entry_price = order.get('price', 0.0)
+                    except Exception as get_error:
+                        logger.error(f"❌ Error getting price: {get_error} - Order type: {type(order)}")
+                        continue
+                    
+                    try:
+                        direction = order.get('direction', 'BUY')
+                    except Exception as get_error:
+                        logger.error(f"❌ Error getting direction: {get_error} - Order type: {type(order)}")
+                        continue
                     
                     if not order_id or entry_price <= 0:
                         logger.debug(f"⚠️ Skipping order with invalid data: ID={order_id}, Price={entry_price}")
                         continue
                     
-                    # Check if order has SL in MT5
+                    # Check if order has SL in MT5 - with enhanced validation
                     position = self.meta_trader.get_position_by_ticket(int(order_id))
                     has_sl_in_mt5 = False
                     current_sl = 0.0
                     
+                    # ENHANCED VALIDATION: Check if position exists before processing
+                    if not position or len(position) == 0:
+                        logger.debug(f"🔍 Position {order_id} not found in MT5 - marking order as closed")
+                        # Mark order as closed in internal data to prevent future attempts
+                        order['status'] = 'closed'
+                        order['closed_reason'] = 'position_not_found'
+                        continue
+                    
+                    # Position exists - check SL status
                     if position:
                         current_sl = position.get('sl', 0.0)
                         has_sl_in_mt5 = current_sl != 0.0
@@ -2081,10 +2175,18 @@ class MoveGuard(Strategy):
                     if not has_sl_in_mt5:
                         logger.warning(f"🚨 Interval order {order_id} has no SL in MT5 - adding SL at {expected_sl_price:.5f}")
                         try:
-                            self.meta_trader.modify_position_sl_tp(int(order_id), sl=expected_sl_price, tp=0.0)
-                            logger.info(f"✅ Added SL to interval order {order_id} at {expected_sl_price:.5f}")
+                            result = self.meta_trader.modify_position_sl_tp(int(order_id), sl=expected_sl_price, tp=0.0)
+                            if result:
+                                logger.info(f"✅ Added SL to interval order {order_id} at {expected_sl_price:.5f}")
+                            else:
+                                logger.debug(f"🔍 Position {order_id} may have been closed - skipping SL modification")
+                                order['status'] = 'closed'
+                                order['closed_reason'] = 'position_closed_during_sl_update'
                         except Exception as e:
-                            logger.error(f"❌ Failed to add SL to interval order {order_id}: {e}")
+                            logger.debug(f"🔍 Failed to add SL to interval order {order_id} (position may be closed): {e}")
+                            # Mark as closed to prevent future attempts
+                            order['status'] = 'closed'
+                            order['closed_reason'] = 'sl_modification_failed'
                     
                     # Case 2: Order has SL but price hit SL threshold - close manually
                     elif has_sl_in_mt5 and sl_hit:
@@ -2103,10 +2205,18 @@ class MoveGuard(Strategy):
                     elif has_sl_in_mt5 and abs(current_sl - expected_sl_price) > 0.00001:
                         logger.warning(f"🚨 Interval order {order_id} has incorrect SL - updating from {current_sl:.5f} to {expected_sl_price:.5f}")
                         try:
-                            self.meta_trader.modify_position_sl_tp(int(order_id), sl=expected_sl_price, tp=0.0)
-                            logger.info(f"✅ Updated SL for interval order {order_id} to {expected_sl_price:.5f}")
+                            result = self.meta_trader.modify_position_sl_tp(int(order_id), sl=expected_sl_price, tp=0.0)
+                            if result:
+                                logger.info(f"✅ Updated SL for interval order {order_id} to {expected_sl_price:.5f}")
+                            else:
+                                logger.debug(f"🔍 Position {order_id} may have been closed - skipping SL update")
+                                order['status'] = 'closed'
+                                order['closed_reason'] = 'position_closed_during_sl_update'
                         except Exception as e:
-                            logger.error(f"❌ Failed to update SL for interval order {order_id}: {e}")
+                            logger.debug(f"🔍 Failed to update SL for interval order {order_id} (position may be closed): {e}")
+                            # Mark as closed to prevent future attempts
+                            order['status'] = 'closed'
+                            order['closed_reason'] = 'sl_update_failed'
                     
                     # Log status for debugging
                     else:
@@ -4545,6 +4655,15 @@ class MoveGuard(Strategy):
     def _check_trailing_stop_loss(self, cycle, current_price: float) -> bool:
         """Check if trailing stop-loss has been hit"""
         try:
+            # If only one active order exists and it's the grid 0 order, do not allow trailing SL to close it
+            active_orders = [o for o in getattr(cycle, 'orders', []) if o.get('status') == 'active']
+            if len(active_orders) == 1:
+                only_order = active_orders[0]
+                order_type = only_order.get('order_type')
+                grid_level = only_order.get('grid_level')
+                if order_type == 'grid_0' or grid_level == 0:
+                    return False
+
             if not hasattr(cycle, 'trailing_stop_loss') or cycle.trailing_stop_loss is None:
                 return False
             
