@@ -70,13 +70,13 @@ def launch_metatrader(data, authorized):
     import time
     from helpers.sync import MT5_LOCK, sync_manager
 
-    # Configure additional logging for synchronization issues
-    sync_logger = logging.getLogger("sync_issues")
-    sync_logger.setLevel(logging.DEBUG)
-    handler = logging.FileHandler("sync_issues.log")
-    handler.setFormatter(logging.Formatter(
-        '%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
-    sync_logger.addHandler(handler)
+    # File logging disabled for synchronization issues
+    # sync_logger = logging.getLogger("sync_issues")
+    # sync_logger.setLevel(logging.DEBUG)
+    # handler = logging.FileHandler("sync_issues.log")
+    # handler.setFormatter(logging.Formatter(
+    #     '%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
+    # sync_logger.addHandler(handler)
 
     username = data.get('username')
     password = data.get('password')
@@ -105,8 +105,8 @@ def launch_metatrader(data, authorized):
 
             app_logger.info(
                 f"Successfully connected to MetaTrader 5 account: {acc['login']}")
-            sync_logger.info(
-                f"MT5 Connection established for account: {acc['login']}")
+            # sync_logger.info(
+            #     f"MT5 Connection established for account: {acc['login']}")
         except Exception as acc_error:
             app_logger.error(
                 f"Error accessing MT5 account information: {acc_error}")
@@ -160,13 +160,13 @@ def launch_metatrader(data, authorized):
                 task4 = asyncio.create_task(flutter_communicator.listen_for_flutter_events())
                 
                 # Log successful startup
-                sync_logger.info("All background tasks started successfully")
+                # sync_logger.info("All background tasks started successfully")
 
                 # Wait for all tasks
                 await asyncio.gather(task1, task2, task3, task4)
             except Exception as task_error:
                 app_logger.error(f"Error in background tasks: {task_error}")
-                sync_logger.error(f"Background task error: {task_error}")
+                # sync_logger.error(f"Background task error: {task_error}")
 
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
@@ -178,7 +178,7 @@ def launch_metatrader(data, authorized):
         while True:
             # Check if MT5 is still connected
             if not expert.authorized:
-                sync_logger.critical("MT5 connection lost")
+                # sync_logger.critical("MT5 connection lost")
                 app_logger.error(
                     "MT5 connection lost, attempting to reconnect")
                 # Could add reconnection logic here
@@ -190,7 +190,7 @@ def launch_metatrader(data, authorized):
         # Show snackbar with the error message
         # log the error
         app_logger.error(f"Metatrader launch failed: {e}")
-        sync_logger.critical(f"Fatal error in Metatrader launch: {e}")
+        # sync_logger.critical(f"Fatal error in Metatrader launch: {e}")
         authorized.put(False)
         return False
 

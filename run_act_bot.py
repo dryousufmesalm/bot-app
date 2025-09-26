@@ -15,8 +15,8 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.StreamHandler(sys.stdout),
-        logging.FileHandler('act_bot_demo.log')
+        logging.StreamHandler(sys.stdout)
+        # logging.FileHandler('act_bot_demo.log')  # File logging disabled
     ]
 )
 
