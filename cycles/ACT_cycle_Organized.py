@@ -464,7 +464,9 @@ class AdvancedCycle(cycle):
             'sl': ['sl', 'stop_loss'],
             'tp': ['tp', 'take_profit'],
             'magic_number': ['magic_number', 'magic'],
-            'comment': ['comment', 'description']
+            'comment': ['comment', 'description'],
+            'open_time': ['open_time', 'placed_at', 'open_datetime'],
+            'placed_at': ['placed_at', 'open_time', 'placed_datetime']
         }
         
         for target_field, source_fields in field_mappings.items():
@@ -485,7 +487,9 @@ class AdvancedCycle(cycle):
         order_data.setdefault('type', 0)  # 0 = BUY, 1 = SELL
         order_data.setdefault('kind', 'initial')  # orderKind - required by Flutter
         order_data.setdefault('status', 'active')
-        order_data.setdefault('open_time', datetime.datetime.now().isoformat())
+        # CRITICAL FIX: Only set open_time if it doesn't exist, preserve original timestamp
+        if 'open_time' not in order_data:
+            order_data['open_time'] = datetime.datetime.now().isoformat()
         order_data.setdefault('symbol', getattr(self, 'symbol', ''))
         order_data.setdefault('open_price', 0.0)
         order_data.setdefault('volume', 0.0)

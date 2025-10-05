@@ -537,7 +537,22 @@ class AdvancedCycle(cycle):
                                 
                                 # FIXED: Use safe float conversions to prevent NoneType errors
                                 order["close_price"] = safe_float(order_info.get('price_close', 0.0), 0.0)
-                                order["profit"] = safe_float(order_info.get('profit', 0.0), 0.0)
+                                
+                                # Preserve profit - try to get from order_info first, then fallback to existing order profit
+                                profit_from_info = safe_float(order_info.get('profit', 0.0), 0.0)
+                                existing_profit = safe_float(order.get('profit', 0.0), 0.0)
+                                
+                                # Use the profit from order_info if available, otherwise preserve existing profit
+                                if profit_from_info != 0.0:
+                                    order["profit"] = profit_from_info
+                                    logger.info(f"💰 Order {order['ticket']} profit from order_info: ${profit_from_info:.2f}")
+                                elif existing_profit != 0.0:
+                                    order["profit"] = existing_profit
+                                    logger.info(f"💰 Order {order['ticket']} using preserved profit: ${existing_profit:.2f}")
+                                else:
+                                    order["profit"] = 0.0
+                                    logger.warning(f"⚠️ Order {order['ticket']} no profit data available - setting to 0.0")
+                                
                                 order["swap"] = safe_float(order_info.get('swap', order.get('swap', 0.0)), 0.0)
                                 order["commission"] = safe_float(order_info.get('commission', order.get('commission', 0.0)), 0.0)
                                 

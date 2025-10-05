@@ -1295,6 +1295,24 @@ class MoveGuard(Strategy):
                 logger.error(f"❌ Error creating cycle in database: {str(e)}")
                 # Continue anyway - the cycle is still created locally
             
+            # CRITICAL FIX: Immediately update profit for the initial order after creation
+            # This ensures the first order has correct profit data before it might be closed
+            try:
+                logger.info(f"🔄 Updating profit for initial order in cycle {cycle.cycle_id}")
+                self._update_cycle_orders_profit_from_mt5(cycle)
+                
+                # Also update cycle statistics with the fresh profit data
+                self._update_cycle_statistics_with_profit(cycle)
+                
+                # Update the cycle in database with the correct profit data
+                self._update_cycle_in_database(cycle, force_update=True)
+                
+                logger.info(f"✅ Initial order profit updated for cycle {cycle.cycle_id}")
+                
+            except Exception as profit_error:
+                logger.warning(f"⚠️ Failed to update initial order profit for cycle {cycle.cycle_id}: {str(profit_error)}")
+                # Continue anyway - the cycle is still created successfully
+            
             logger.info(f"✅ MoveGuard cycle {cycle.cycle_id} created successfully")
             return True
             
@@ -1781,10 +1799,11 @@ class MoveGuard(Strategy):
                         # Calculate grid start price for BUY orders
                         grid_start_price = upper + (entry_interval_pips * pip_value)
                         logger.info(f"🎯 MoveGuard placing first BUY order - price {current_price} >= upper+offset {upper + initial_offset}, placing at grid_start_price {grid_start_price}")
-                        self._place_initial_order(cycle, 'BUY', grid_start_price)
+                        self._place_initial_order(cycle, 'BUY', current_price)
                         # Use cycle-specific zone_threshold_pips from cycle_config
                         cycle_zone_threshold_pips = cycle.cycle_config.get('zone_threshold_pips', 50.0) if hasattr(cycle, 'cycle_config') and cycle.cycle_config else 50.0
                         cycle.lower_bound = upper - (cycle_zone_threshold_pips * pip_value)
+                        cycle.highest_buy_price = current_price
                         lower = cycle.lower_bound
                         #update zone data
                         cycle.zone_data['upper_boundary'] = upper
@@ -1796,10 +1815,11 @@ class MoveGuard(Strategy):
                         # Calculate grid start price for SELL orders
                         grid_start_price = lower - (entry_interval_pips * pip_value)
                         logger.info(f"🎯 MoveGuard placing first SELL order - price {current_price} <= lower-offset {lower - initial_offset}, placing at grid_start_price {grid_start_price}")
-                        self._place_initial_order(cycle, 'SELL', grid_start_price)
+                        self._place_initial_order(cycle, 'SELL', current_price)
                         # Use cycle-specific zone_threshold_pips from cycle_config
                         cycle_zone_threshold_pips = self.get_cycle_zone_threshold_pips(cycle)
                         cycle.upper_bound = lower + (cycle_zone_threshold_pips * pip_value)
+                        cycle.lowest_sell_price = current_price
                         upper = cycle.upper_bound
                         #update zone data   
                         cycle.zone_data['upper_boundary'] = upper
@@ -1825,12 +1845,14 @@ class MoveGuard(Strategy):
                         # Place order if price has reached or exceeded the target
                         if current_price >= target_price:
                             logger.info(f"📈 BUY Grid Level {grid_level}: Price {current_price:.5f} >= Target {target_price:.5f} (Grid Start: {grid_start_price:.5f}, Interval: {grid_interval_pips} pips)")
-                            self._place_grid_buy_order(cycle, current_price, grid_level)
-                            cycle.highest_buy_price = max(cycle.highest_buy_price, current_price)
-                            # Update trailing stop-loss after placing new buy order
-                            cycle_zone_threshold_pips = self.get_cycle_zone_threshold_pips(cycle)
-                            cycle.trailing_stop_loss = cycle.highest_buy_price - (cycle_zone_threshold_pips * pip_value)
-                            cycle.trailing_stop_loss = max(cycle.trailing_stop_loss, upper)
+                            done=self._place_grid_buy_order(cycle, current_price, grid_level)
+                            if done:
+                                cycle.highest_buy_price = max(cycle.highest_buy_price, current_price)
+                                # Update trailing stop-loss after placing new buy order
+                                cycle_zone_threshold_pips = self.get_cycle_zone_threshold_pips(cycle)
+                                if cycle.zone_movement_mode == 'Move Both Sides' or cycle.zone_movement_mode == 'Move Up Only':
+                                    cycle.trailing_stop_loss = cycle.highest_buy_price - (cycle_zone_threshold_pips * pip_value)
+                                    cycle.trailing_stop_loss = max(cycle.trailing_stop_loss, upper)
                             continue
                             
                     elif cycle.direction == 'SELL':
@@ -1841,12 +1863,14 @@ class MoveGuard(Strategy):
                         # Place order if price has reached or fallen below the target
                         if current_price <= target_price:
                             logger.info(f"📉 SELL Grid Level {grid_level}: Price {current_price:.5f} <= Target {target_price:.5f} (Grid Start: {grid_start_price:.5f}, Interval: {grid_interval_pips} pips)")
-                            self._place_grid_sell_order(cycle, current_price, grid_level)
-                            cycle.lowest_sell_price = min(cycle.lowest_sell_price, current_price)
-                            # Update trailing stop-loss after placing new sell order
-                            cycle_zone_threshold_pips = self.get_cycle_zone_threshold_pips(cycle)
-                            cycle.trailing_stop_loss = cycle.lowest_sell_price + (cycle_zone_threshold_pips * pip_value)
-                            cycle.trailing_stop_loss = min(cycle.trailing_stop_loss, lower)
+                            done=self._place_grid_sell_order(cycle, current_price, grid_level)
+                            if done:
+                                cycle.lowest_sell_price = min(cycle.lowest_sell_price, current_price)
+                                # Update trailing stop-loss after placing new sell order
+                                cycle_zone_threshold_pips = self.get_cycle_zone_threshold_pips(cycle)
+                                if cycle.zone_movement_mode == 'Move Both Sides' or cycle.zone_movement_mode == 'Move Down Only':
+                                    cycle.trailing_stop_loss = cycle.lowest_sell_price + (cycle_zone_threshold_pips * pip_value)
+                                    cycle.trailing_stop_loss = min(cycle.trailing_stop_loss, lower)
                             continue
                     
                 # Enforce initial order SL logic without closing cycle
@@ -1949,8 +1973,8 @@ class MoveGuard(Strategy):
                 # Add grid_0 order to grid_orders list since it's part of the grid system
                 cycle.grid_data['grid_orders'].append(order_info)
                 
-                # Initialize trailing stop-loss for both BUY and SELL orders
-                self._update_trailing_stop_loss(cycle, order_price)
+                # # Initialize trailing stop-loss for both BUY and SELL orders
+                # self._update_trailing_stop_loss(cycle, order_price)
                 
                 return True
             else:
@@ -2159,8 +2183,10 @@ class MoveGuard(Strategy):
                         continue
                     
                     # Position exists - check SL status
-                    if position:
-                        current_sl = position.get('sl', 0.0)
+                    if position and len(position) > 0:
+                        # Get the first position object and access its attributes safely
+                        position_obj = position[0]
+                        current_sl = getattr(position_obj, 'sl', 0.0)
                         has_sl_in_mt5 = current_sl != 0.0
                     
                     # Calculate expected SL price
@@ -2997,7 +3023,10 @@ class MoveGuard(Strategy):
                     'is_grid': True,
                     'order_type': f'grid_{grid_level}',
                     'status': 'active',
-                    'placed_at': datetime.datetime.now().isoformat()
+                    'placed_at': datetime.datetime.now().isoformat(),
+                    'profit': 0.0,
+                    'profit_pips': 0.0,
+                    'last_profit_update': datetime.datetime.now().isoformat()
                 }
                 
                 # Add order to cycle
@@ -3032,6 +3061,24 @@ class MoveGuard(Strategy):
                         'last_grid_price': order_price,
                         'grid_orders': [order_info]
                     }
+                
+                # CRITICAL FIX: Immediately update profit for the grid order after creation
+                try:
+                    logger.info(f"🔄 Updating profit for grid BUY order {order_info['order_id']} in cycle {cycle.cycle_id}")
+                    
+                    # Get current profit from MetaTrader
+                    order_profit = self._calculate_order_profit(order_info)
+                    
+                    # Update order with fresh profit data
+                    order_info['profit'] = order_profit['profit']
+                    order_info['profit_pips'] = order_profit['profit_pips']
+                    order_info['last_profit_update'] = datetime.datetime.now().isoformat()
+                    
+                    logger.info(f"✅ Grid BUY order {order_info['order_id']} profit updated: ${order_profit['profit']:.2f} ({order_profit['profit_pips']:.2f} pips)")
+                    
+                except Exception as profit_error:
+                    logger.warning(f"⚠️ Failed to update grid BUY order profit for {order_info['order_id']}: {str(profit_error)}")
+                    # Continue anyway - the order is still created successfully
                 
                 logger.info(f"✅ MoveGuard grid BUY order placed successfully: {order_info['order_id']}")
                 return True
@@ -3121,7 +3168,10 @@ class MoveGuard(Strategy):
                     'is_grid': True,
                     'order_type': f'grid_{grid_level}',
                     'status': 'active',
-                    'placed_at': datetime.datetime.now().isoformat()
+                    'placed_at': datetime.datetime.now().isoformat(),
+                    'profit': 0.0,
+                    'profit_pips': 0.0,
+                    'last_profit_update': datetime.datetime.now().isoformat()
                 }
                 
                 # Add order to cycle
@@ -3156,6 +3206,24 @@ class MoveGuard(Strategy):
                         'last_grid_price': order_price,
                         'grid_orders': [order_info]
                     }
+                
+                # CRITICAL FIX: Immediately update profit for the grid order after creation
+                try:
+                    logger.info(f"🔄 Updating profit for grid SELL order {order_info['order_id']} in cycle {cycle.cycle_id}")
+                    
+                    # Get current profit from MetaTrader
+                    order_profit = self._calculate_order_profit(order_info)
+                    
+                    # Update order with fresh profit data
+                    order_info['profit'] = order_profit['profit']
+                    order_info['profit_pips'] = order_profit['profit_pips']
+                    order_info['last_profit_update'] = datetime.datetime.now().isoformat()
+                    
+                    logger.info(f"✅ Grid SELL order {order_info['order_id']} profit updated: ${order_profit['profit']:.2f} ({order_profit['profit_pips']:.2f} pips)")
+                    
+                except Exception as profit_error:
+                    logger.warning(f"⚠️ Failed to update grid SELL order profit for {order_info['order_id']}: {str(profit_error)}")
+                    # Continue anyway - the order is still created successfully
                 
                 logger.info(f"✅ MoveGuard grid SELL order placed successfully: {order_info['order_id']}")
                 return True
@@ -3590,22 +3658,26 @@ class MoveGuard(Strategy):
                 positions = None
                 
             if positions and len(positions) > 0:
+                # Preserve profit before closing the position
+                self._preserve_order_profit_before_closure(order)
+                
                 # Close active position
                 pos = positions[0]
                 result = self.meta_trader.close_position(pos)
                 if result is not None:
-                    # Preserve existing profit data, only update status
-                    existing_profit = order.get('profit', 0.0)
-                    existing_profit_pips = order.get('profit_pips', 0.0)
+                    # Use preserved profit data
+                    preserved_profit = order.get('profit', 0.0)
+                    preserved_profit_pips = order.get('profit_pips', 0.0)
+                    
                     order['status'] = 'closed'
                     order['closed_at'] = datetime.datetime.now().isoformat()
-                    # Keep existing profit data, don't recalculate
-                    order['profit'] = existing_profit
-                    order['profit_pips'] = existing_profit_pips
+                    # Keep preserved profit data
+                    order['profit'] = preserved_profit
+                    order['profit_pips'] = preserved_profit_pips
                     # Ensure both keys are kept in sync for downstream persistence
                     order['order_id'] = int(order_id)
                     order['ticket'] = int(order_id)
-                    logger.info(f"✅ MoveGuard active position {order_id} closed with preserved profit: {existing_profit:.2f} ({existing_profit_pips:.2f} pips)")
+                    logger.info(f"✅ MoveGuard active position {order_id} closed with preserved profit: ${preserved_profit:.2f} ({preserved_profit_pips:.2f} pips)")
                     return True
                 else:
                     logger.error(f"❌ Failed to close MoveGuard active position {order_id}")
@@ -3955,14 +4027,43 @@ class MoveGuard(Strategy):
                     
                     # Check if order still exists in MT5
                     if not self._order_exists_in_mt5(order_id):
-                        # Order no longer exists, calculate profit and mark as closed
-                        order_profit = self._calculate_order_profit(order)
+                        # Order no longer exists - preserve profit before marking as closed
+                        logger.info(f"🔄 Order {order_id} no longer exists in MT5 - preserving profit before closure")
+                        
+                        # Try to preserve profit before closure
+                        profit_preserved = self._preserve_order_profit_before_closure(order)
+                        
+                        # Try to get the last known profit from the order itself
+                        last_profit = order.get('profit', 0.0)
+                        last_profit_pips = order.get('profit_pips', 0.0)
+                        
+                        # SPECIAL HANDLING: For initial orders, ensure we have profit data
+                        is_initial_order = order.get('is_initial', False) or order.get('order_type') == 'grid_0'
+                        if is_initial_order and last_profit == 0.0:
+                            logger.warning(f"⚠️ Initial order {order_id} has no profit data - attempting emergency profit calculation")
+                            
+                        # If no profit data exists, try to calculate from MT5 one last time
+                        if last_profit == 0.0:
+                            order_profit = self._calculate_order_profit(order)
+                            last_profit = order_profit['profit']
+                            last_profit_pips = order_profit['profit_pips']
+                            
+                            # Log if we still have no profit data for initial orders
+                            if is_initial_order and last_profit == 0.0:
+                                logger.error(f"❌ CRITICAL: Initial order {order_id} still has no profit data after emergency calculation!")
+                        
+                        # Mark order as closed with preserved profit
                         order['status'] = 'closed'
                         order['closed_at'] = datetime.datetime.now().isoformat()
-                        order['profit'] = order_profit['profit']
-                        order['profit_pips'] = order_profit['profit_pips']
+                        order['profit'] = last_profit
+                        order['profit_pips'] = last_profit_pips
+                        
+                        # Store close price if available
+                        if 'close_price' in order:
+                            order['close_price'] = order.get('close_price', 0.0)
+                        
                         orders_updated = True
-                        logger.info(f"✅ Order {order_id} marked as closed with profit: {order_profit['profit']:.2f} ({order_profit['profit_pips']:.2f} pips)")
+                        logger.info(f"✅ Order {order_id} marked as closed with preserved profit: ${last_profit:.2f} ({last_profit_pips:.2f} pips)")
                 
                 # If orders were updated, recalculate cycle statistics
                 if orders_updated:
@@ -4088,13 +4189,58 @@ class MoveGuard(Strategy):
         except Exception as e:
             logger.error(f"❌ Error updating cycle statistics with profit: {str(e)}")
 
+    def _preserve_order_profit_before_closure(self, order):
+        """Preserve the current profit of an order before it gets closed"""
+        try:
+            order_id = order.get('order_id') or order.get('ticket')
+            if not order_id:
+                logger.warning(f"⚠️ No order ID/ticket found for profit preservation")
+                return False
+            
+            # Get current profit from MetaTrader if order is still active
+            positions = self.meta_trader.get_position_by_ticket(int(order_id))
+            
+            if positions and len(positions) > 0:
+                position = positions[0]
+                current_profit = getattr(position, 'profit', 0.0)
+                current_swap = getattr(position, 'swap', 0.0)
+                current_commission = getattr(position, 'commission', 0.0)
+                
+                # Preserve the profit data in the order
+                order['profit'] = current_profit
+                order['swap'] = current_swap
+                order['commission'] = current_commission
+                order['close_price'] = getattr(position, 'price_current', 0.0)
+                
+                logger.info(f"💰 Preserved profit for order {order_id}: ${current_profit:.2f} (swap: ${current_swap:.2f}, commission: ${current_commission:.2f})")
+                return True
+            else:
+                # Order not found in positions, might already be closed
+                logger.debug(f"⚠️ Order {order_id} not found in positions for profit preservation")
+                return False
+                
+        except Exception as e:
+            logger.error(f"❌ Error preserving profit for order {order_id}: {str(e)}")
+            return False
+
     def _calculate_order_profit(self, order):
-        """Get profit for a specific order directly from MetaTrader"""
+        """Get profit for a specific order directly from MetaTrader or use preserved profit"""
         try:
             order_id = order.get('order_id') or order.get('ticket')
             if not order_id:
                 logger.warning(f"⚠️ No order ID/ticket found for order in profit calculation")
                 return {'profit': 0.0, 'profit_pips': 0.0}
+            
+            # Check if order already has preserved profit (for closed orders)
+            if order.get('status') == 'closed' and 'profit' in order:
+                preserved_profit = order.get('profit', 0.0)
+                preserved_profit_pips = order.get('profit_pips', 0.0)
+                logger.info(f"💰 Using preserved profit for closed order {order_id}: ${preserved_profit:.2f} ({preserved_profit_pips:.2f} pips)")
+                return {
+                    'profit': preserved_profit,
+                    'profit_pips': preserved_profit_pips,
+                    'close_price': order.get('close_price', 0.0)
+                }
             
             # Get position data directly from MetaTrader
             positions = self.meta_trader.get_position_by_ticket(int(order_id))
@@ -4127,9 +4273,23 @@ class MoveGuard(Strategy):
                     'close_price': current_price
                 }
             else:
-                # Position not found, return 0 profit
-                logger.debug(f"⚠️ Order {order_id} not found in MetaTrader positions - may be pending or closed")
-                return {'profit': 0.0, 'profit_pips': 0.0}
+                # Position not found - try to get profit from order history or preserve last known value
+                logger.debug(f"⚠️ Order {order_id} not found in MetaTrader positions - trying to preserve last profit")
+                
+                # Try to get profit from order history or use last known value
+                last_profit = order.get('profit', 0.0)
+                last_profit_pips = order.get('profit_pips', 0.0)
+                
+                if last_profit != 0.0:
+                    logger.info(f"💰 Using last known profit for order {order_id}: ${last_profit:.2f} ({last_profit_pips:.2f} pips)")
+                    return {
+                        'profit': last_profit,
+                        'profit_pips': last_profit_pips,
+                        'close_price': order.get('close_price', 0.0)
+                    }
+                else:
+                    logger.warning(f"⚠️ No profit data available for order {order_id} - returning 0.0")
+                    return {'profit': 0.0, 'profit_pips': 0.0}
             
         except Exception as e:
             logger.error(f"❌ Error getting order profit from MetaTrader for order {order_id}: {str(e)}")
@@ -4975,8 +5135,32 @@ class MoveGuard(Strategy):
             # Check if we can create more cycles (respect max_active_cycles limit)
             active_cycles = self.multi_cycle_manager.get_all_active_cycles()
             max_active_cycles = self.get_cycle_config_value(None, 'max_active_cycles', self.max_active_cycles)
+            
+            # Enhanced diagnostic logging for cycle creation blocking
+            closed_cycles_count = sum(1 for cycle in active_cycles if getattr(cycle, 'is_closed', False))
+            truly_active_count = len(active_cycles) - closed_cycles_count
+            
             if len(active_cycles) >= max_active_cycles:
-                logger.info(f"🎯 Max active cycles ({max_active_cycles}) reached, skipping interval cycle creation. Current active cycles: {len(active_cycles)}")
+                logger.warning(f"🚫 CYCLE CREATION BLOCKED: Max cycles ({max_active_cycles}) reached!")
+                logger.warning(f"   📊 Total cycles in manager: {len(active_cycles)}")
+                logger.warning(f"   📊 Truly active cycles: {truly_active_count}")
+                logger.warning(f"   📊 Closed cycles still in manager: {closed_cycles_count}")
+                logger.warning(f"   🔧 Recommendation: Clean up closed cycles to allow new cycle creation")
+                
+                # Try to clean up closed cycles if we have any
+                if closed_cycles_count > 0:
+                    logger.info(f"🧹 Attempting to clean up {closed_cycles_count} closed cycles...")
+                    self.multi_cycle_manager.cleanup_closed_cycles()
+                    # Recheck after cleanup
+                    active_cycles_after_cleanup = self.multi_cycle_manager.get_all_active_cycles()
+                    logger.info(f"✅ After cleanup: {len(active_cycles_after_cleanup)} cycles remaining")
+                    
+                    # If we now have room, continue with cycle creation
+                    if len(active_cycles_after_cleanup) < max_active_cycles:
+                        logger.info(f"✅ Cleanup successful! Proceeding with cycle creation...")
+                        active_cycles = active_cycles_after_cleanup
+                    else:
+                        logger.info(f"🎯 Max active cycles ({max_active_cycles}) reached, skipping interval cycle creation. Current active cycles: {len(active_cycles)}")
                 if direction == "BUY" and current_level > self.meta_trader.get_ask(self.symbol):
                     return
                 if direction == "SELL" and current_level < self.meta_trader.get_bid(self.symbol):
@@ -5067,9 +5251,35 @@ class MoveGuard(Strategy):
             # Double-check if we can create more cycles (safety check)
             active_cycles = self.multi_cycle_manager.get_all_active_cycles()
             max_active_cycles = self.get_cycle_config_value(None, 'max_active_cycles', self.max_active_cycles)
+            
+            # Enhanced diagnostic logging for cycle creation blocking
+            closed_cycles_count = sum(1 for cycle in active_cycles if getattr(cycle, 'is_closed', False))
+            truly_active_count = len(active_cycles) - closed_cycles_count
+            
             if len(active_cycles) >= max_active_cycles:
-                logger.warning(f"Cannot create new cycle: max cycles ({max_active_cycles}) reached")
-                return False
+                logger.warning(f"🚫 CYCLE CREATION BLOCKED in _create_interval_cycle_sync: Max cycles ({max_active_cycles}) reached!")
+                logger.warning(f"   📊 Total cycles in manager: {len(active_cycles)}")
+                logger.warning(f"   📊 Truly active cycles: {truly_active_count}")
+                logger.warning(f"   📊 Closed cycles still in manager: {closed_cycles_count}")
+                
+                # Try to clean up closed cycles if we have any
+                if closed_cycles_count > 0:
+                    logger.info(f"🧹 Attempting to clean up {closed_cycles_count} closed cycles in _create_interval_cycle_sync...")
+                    self.multi_cycle_manager.cleanup_closed_cycles()
+                    # Recheck after cleanup
+                    active_cycles_after_cleanup = self.multi_cycle_manager.get_all_active_cycles()
+                    logger.info(f"✅ After cleanup: {len(active_cycles_after_cleanup)} cycles remaining")
+                    
+                    # If we now have room, continue with cycle creation
+                    if len(active_cycles_after_cleanup) < max_active_cycles:
+                        logger.info(f"✅ Cleanup successful! Proceeding with cycle creation in _create_interval_cycle_sync...")
+                        active_cycles = active_cycles_after_cleanup
+                    else:
+                        logger.warning(f"Cannot create new cycle: max cycles ({max_active_cycles}) reached")
+                        return False
+                else:
+                    logger.warning(f"Cannot create new cycle: max cycles ({max_active_cycles}) reached")
+                    return False
                 
         except Exception as e:
             logger.error(f"❌ Error creating interval cycle: {str(e)}")
@@ -5245,6 +5455,79 @@ class MoveGuard(Strategy):
         except Exception as e:
             logger.error(f"❌ Error re-initializing symbol-dependent components: {str(e)}")
             raise
+
+    def diagnose_cycle_creation_status(self):
+        """Diagnostic method to check why cycle creation might be blocked"""
+        try:
+            logger.info("🔍 === CYCLE CREATION DIAGNOSTIC REPORT ===")
+            
+            # Check active cycles
+            active_cycles = self.multi_cycle_manager.get_all_active_cycles()
+            max_active_cycles = self.get_cycle_config_value(None, 'max_active_cycles', self.max_active_cycles)
+            
+            closed_cycles_count = sum(1 for cycle in active_cycles if getattr(cycle, 'is_closed', False))
+            truly_active_count = len(active_cycles) - closed_cycles_count
+            
+            logger.info(f"📊 Active Cycles Status:")
+            logger.info(f"   - Total cycles in manager: {len(active_cycles)}")
+            logger.info(f"   - Max allowed cycles: {max_active_cycles}")
+            logger.info(f"   - Truly active cycles: {truly_active_count}")
+            logger.info(f"   - Closed cycles still in manager: {closed_cycles_count}")
+            logger.info(f"   - Available slots: {max_active_cycles - len(active_cycles)}")
+            
+            # Check auto_place_cycles setting
+            auto_place = getattr(self, 'auto_place_cycles', True)
+            logger.info(f"⚙️ Configuration:")
+            logger.info(f"   - Auto place cycles: {auto_place}")
+            logger.info(f"   - Last cycle price: {getattr(self, 'last_cycle_price', 'Not set')}")
+            
+            # Check for any stuck cycles
+            stuck_cycles = []
+            for cycle in active_cycles:
+                if getattr(cycle, 'is_closed', False):
+                    stuck_cycles.append(cycle.cycle_id)
+            
+            if stuck_cycles:
+                logger.warning(f"⚠️ Found {len(stuck_cycles)} closed cycles still in manager: {stuck_cycles}")
+                logger.warning(f"   🔧 Recommendation: Run cleanup_closed_cycles() to remove them")
+            else:
+                logger.info(f"✅ No stuck closed cycles found")
+            
+            # Check cycle creation capability
+            if len(active_cycles) >= max_active_cycles:
+                logger.warning(f"🚫 CYCLE CREATION BLOCKED: Maximum cycles reached")
+                if closed_cycles_count > 0:
+                    logger.warning(f"   💡 Solution: Clean up {closed_cycles_count} closed cycles to free up slots")
+                else:
+                    logger.warning(f"   💡 Solution: Increase max_active_cycles or wait for cycles to close naturally")
+            else:
+                logger.info(f"✅ Cycle creation should be working normally")
+            
+            logger.info("🔍 === END DIAGNOSTIC REPORT ===")
+            
+        except Exception as e:
+            logger.error(f"❌ Error in cycle creation diagnostic: {str(e)}")
+
+    def force_cleanup_closed_cycles(self):
+        """Force cleanup of all closed cycles to free up slots for new cycle creation"""
+        try:
+            logger.info("🧹 Force cleaning up closed cycles...")
+            
+            before_count = len(self.multi_cycle_manager.get_all_active_cycles())
+            cleaned_count = self.multi_cycle_manager.cleanup_closed_cycles()
+            after_count = len(self.multi_cycle_manager.get_all_active_cycles())
+            
+            logger.info(f"✅ Cleanup completed:")
+            logger.info(f"   - Cycles before cleanup: {before_count}")
+            logger.info(f"   - Cycles cleaned up: {cleaned_count}")
+            logger.info(f"   - Cycles after cleanup: {after_count}")
+            logger.info(f"   - Available slots: {self.get_cycle_config_value(None, 'max_active_cycles', self.max_active_cycles) - after_count}")
+            
+            return cleaned_count
+            
+        except Exception as e:
+            logger.error(f"❌ Error in force cleanup: {str(e)}")
+            return 0
 
     def _reset_symbol_specific_state(self):
         """Reset any symbol-specific internal state"""
