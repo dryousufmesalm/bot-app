@@ -1776,7 +1776,7 @@ class MoveGuard(Strategy):
                 initial_offset = entry_interval_pips * pip_value
 
                 active_order_count = len([o for o in getattr(cycle, 'orders', []) if o.get('status') == 'active'])
-                
+                total_order_count = len([o for o in getattr(cycle, 'orders', [])])
                 # Get grid orders safely using helper method
                 grid_orders = self._get_grid_orders_safely(cycle)
                 active_grid_order_count = len([o for o in grid_orders if o.get('status') == 'active'])
@@ -1801,13 +1801,14 @@ class MoveGuard(Strategy):
                         logger.info(f"🎯 MoveGuard placing first BUY order - price {current_price} >= upper+offset {upper + initial_offset}, placing at grid_start_price {grid_start_price}")
                         self._place_initial_order(cycle, 'BUY', current_price)
                         # Use cycle-specific zone_threshold_pips from cycle_config
-                        cycle_zone_threshold_pips = cycle.cycle_config.get('zone_threshold_pips', 50.0) if hasattr(cycle, 'cycle_config') and cycle.cycle_config else 50.0
-                        cycle.lower_bound = upper - (cycle_zone_threshold_pips * pip_value)
-                        cycle.highest_buy_price = current_price
-                        lower = cycle.lower_bound
-                        #update zone data
-                        cycle.zone_data['upper_boundary'] = upper
-                        cycle.zone_data['lower_boundary'] = lower
+                        if total_order_count == 0:
+                            cycle_zone_threshold_pips = cycle.cycle_config.get('zone_threshold_pips', 50.0) if hasattr(cycle, 'cycle_config') and cycle.cycle_config else 50.0
+                            cycle.lower_bound = upper - (cycle_zone_threshold_pips * pip_value)
+                            cycle.highest_buy_price = current_price
+                            lower = cycle.lower_bound
+                            #update zone data
+                            cycle.zone_data['upper_boundary'] = upper
+                            cycle.zone_data['lower_boundary'] = lower
                         continue
                     elif current_price <= (lower - initial_offset):
                         cycle.direction = 'SELL'
@@ -1817,13 +1818,14 @@ class MoveGuard(Strategy):
                         logger.info(f"🎯 MoveGuard placing first SELL order - price {current_price} <= lower-offset {lower - initial_offset}, placing at grid_start_price {grid_start_price}")
                         self._place_initial_order(cycle, 'SELL', current_price)
                         # Use cycle-specific zone_threshold_pips from cycle_config
-                        cycle_zone_threshold_pips = self.get_cycle_zone_threshold_pips(cycle)
-                        cycle.upper_bound = lower + (cycle_zone_threshold_pips * pip_value)
-                        cycle.lowest_sell_price = current_price
-                        upper = cycle.upper_bound
-                        #update zone data   
-                        cycle.zone_data['upper_boundary'] = upper
-                        cycle.zone_data['lower_boundary'] = lower
+                        if total_order_count == 0:
+                            cycle_zone_threshold_pips = self.get_cycle_zone_threshold_pips(cycle)
+                            cycle.upper_bound = lower + (cycle_zone_threshold_pips * pip_value)
+                            cycle.lowest_sell_price = current_price
+                            upper = cycle.upper_bound
+                            #update zone data   
+                            cycle.zone_data['upper_boundary'] = upper
+                            cycle.zone_data['lower_boundary'] = lower
                         continue
 
                 # Subsequent grid orders: price-based grid placement
