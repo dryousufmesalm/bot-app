@@ -1847,14 +1847,30 @@ class MoveGuard(Strategy):
                         # Place order if price has reached or exceeded the target
                         if current_price >= target_price:
                             logger.info(f"📈 BUY Grid Level {grid_level}: Price {current_price:.5f} >= Target {target_price:.5f} (Grid Start: {grid_start_price:.5f}, Interval: {grid_interval_pips} pips)")
+                            
+                            # CRITICAL: Update highest buy price BEFORE placing order
+                            cycle.highest_buy_price = max(cycle.highest_buy_price, current_price)
+                            
+                            # Calculate and set NEW trailing SL BEFORE placing the order
+                            cycle_zone_threshold_pips = self.get_cycle_zone_threshold_pips(cycle)
+                            new_trailing_sl = cycle.highest_buy_price - (cycle_zone_threshold_pips * pip_value)
+                            new_trailing_sl = max(new_trailing_sl, upper)
+                            cycle.trailing_stop_loss = new_trailing_sl
+                            logger.info(f"📊 Pre-calculated BUY trailing SL before placing order: {new_trailing_sl:.5f} (zone_mode={cycle.zone_movement_mode})")
+                            
+                            # Now place the order - it will use the updated trailing_stop_loss
+                            logger.info(f"🎯 About to place BUY grid order {grid_level} with trailing SL: {cycle.trailing_stop_loss:.5f}")
                             done=self._place_grid_buy_order(cycle, current_price, grid_level)
                             if done:
-                                cycle.highest_buy_price = max(cycle.highest_buy_price, current_price)
-                                # Update trailing stop-loss after placing new buy order
-                                cycle_zone_threshold_pips = self.get_cycle_zone_threshold_pips(cycle)
-                                if cycle.zone_movement_mode == 'Move Both Sides' or cycle.zone_movement_mode == 'Move Up Only':
-                                    cycle.trailing_stop_loss = cycle.highest_buy_price - (cycle_zone_threshold_pips * pip_value)
-                                    cycle.trailing_stop_loss = max(cycle.trailing_stop_loss, upper)
+                                # After placing, update ALL existing orders to match
+                                logger.info(f"🔄 Updating ALL orders' SL to {cycle.trailing_stop_loss:.5f} after placing grid {grid_level}")
+                                success = self._update_all_orders_trailing_sl(cycle, cycle.trailing_stop_loss)
+                                if not success:
+                                    logger.error(f"❌ CRITICAL: Failed to update trailing SL for cycle {cycle.cycle_id}")
+                                    logger.info(f"🚀 Attempting FORCE update as fallback...")
+                                    force_success = self._force_update_all_orders_sl(cycle, cycle.trailing_stop_loss)
+                                    if not force_success:
+                                        logger.error(f"❌ CRITICAL: Force update also failed for cycle {cycle.cycle_id}")
                             continue
                             
                     elif cycle.direction == 'SELL':
@@ -1865,14 +1881,30 @@ class MoveGuard(Strategy):
                         # Place order if price has reached or fallen below the target
                         if current_price <= target_price:
                             logger.info(f"📉 SELL Grid Level {grid_level}: Price {current_price:.5f} <= Target {target_price:.5f} (Grid Start: {grid_start_price:.5f}, Interval: {grid_interval_pips} pips)")
+                            
+                            # CRITICAL: Update lowest sell price BEFORE placing order
+                            cycle.lowest_sell_price = min(cycle.lowest_sell_price, current_price)
+                            
+                            # Calculate and set NEW trailing SL BEFORE placing the order
+                            cycle_zone_threshold_pips = self.get_cycle_zone_threshold_pips(cycle)
+                            new_trailing_sl = cycle.lowest_sell_price + (cycle_zone_threshold_pips * pip_value)
+                            new_trailing_sl = min(new_trailing_sl, lower)
+                            cycle.trailing_stop_loss = new_trailing_sl
+                            logger.info(f"📊 Pre-calculated SELL trailing SL before placing order: {new_trailing_sl:.5f} (zone_mode={cycle.zone_movement_mode})")
+                            
+                            # Now place the order - it will use the updated trailing_stop_loss
+                            logger.info(f"🎯 About to place SELL grid order {grid_level} with trailing SL: {cycle.trailing_stop_loss:.5f}")
                             done=self._place_grid_sell_order(cycle, current_price, grid_level)
                             if done:
-                                cycle.lowest_sell_price = min(cycle.lowest_sell_price, current_price)
-                                # Update trailing stop-loss after placing new sell order
-                                cycle_zone_threshold_pips = self.get_cycle_zone_threshold_pips(cycle)
-                                if cycle.zone_movement_mode == 'Move Both Sides' or cycle.zone_movement_mode == 'Move Down Only':
-                                    cycle.trailing_stop_loss = cycle.lowest_sell_price + (cycle_zone_threshold_pips * pip_value)
-                                    cycle.trailing_stop_loss = min(cycle.trailing_stop_loss, lower)
+                                # After placing, update ALL existing orders to match
+                                logger.info(f"🔄 Updating ALL orders' SL to {cycle.trailing_stop_loss:.5f} after placing grid {grid_level}")
+                                success = self._update_all_orders_trailing_sl(cycle, cycle.trailing_stop_loss)
+                                if not success:
+                                    logger.error(f"❌ CRITICAL: Failed to update trailing SL for cycle {cycle.cycle_id}")
+                                    logger.info(f"🚀 Attempting FORCE update as fallback...")
+                                    force_success = self._force_update_all_orders_sl(cycle, cycle.trailing_stop_loss)
+                                    if not force_success:
+                                        logger.error(f"❌ CRITICAL: Force update also failed for cycle {cycle.cycle_id}")
                             continue
                     
                 # Enforce initial order SL logic without closing cycle
@@ -2407,6 +2439,131 @@ class MoveGuard(Strategy):
         except Exception as e:
             logger.error(f"❌ Error checking cycle processing: {str(e)}")
             return True  # Default to process if there's an error
+
+    def _update_all_orders_trailing_sl(self, cycle, new_trailing_sl: float) -> bool:
+        """Update stop loss for all active orders in the cycle to the new trailing SL value
+        
+        This is the BETTER approach - modify actual MT5 orders instead of tracking in memory.
+        MT5 will automatically close orders when price hits their SL, even if bot crashes.
+        
+        Args:
+            cycle: The cycle object
+            new_trailing_sl: The new trailing stop-loss price
+            
+        Returns:
+            bool: True if at least one order was successfully updated
+        """
+        try:
+            if not hasattr(cycle, 'orders') or not cycle.orders:
+                logger.debug(f"No orders found for cycle {cycle.cycle_id}")
+                return False
+            
+            active_orders = [o for o in cycle.orders if o.get('status') == 'active']
+            if not active_orders:
+                logger.debug(f"No active orders to update SL for cycle {cycle.cycle_id}")
+                return False
+            
+            updated_count = 0
+            failed_count = 0
+            
+            for order in active_orders:
+                order_id = order.get('ticket') or order.get('order_id')
+                if not order_id:
+                    logger.warning(f"⚠️ Order missing ticket/order_id: {order}")
+                    continue
+                
+                try:
+                    # Check if position still exists in MT5
+                    position = self.meta_trader.get_position_by_ticket(int(order_id))
+                    if not position or len(position) == 0:
+                        logger.debug(f"🔍 Position {order_id} not found in MT5 - skipping SL update")
+                        order['status'] = 'closed'
+                        order['closed_reason'] = 'position_not_found'
+                        continue
+                    
+                    # Modify the position's stop loss in MT5
+                    logger.debug(f"🔧 Attempting to modify SL for order {order_id} from {order.get('stop_loss', 'unknown')} to {new_trailing_sl:.5f}")
+                    result = self.meta_trader.modify_position_sl_tp(
+                        ticket=int(order_id),
+                        sl=new_trailing_sl,
+                        tp=0.0
+                    )
+                    
+                    if result:
+                        updated_count += 1
+                        logger.info(f"✅ Successfully updated SL for order {order_id} to {new_trailing_sl:.5f}")
+                        # Update order record with new SL
+                        order['stop_loss'] = new_trailing_sl
+                    else:
+                        failed_count += 1
+                        logger.warning(f"⚠️ Failed to update SL for order {order_id} - modify_position_sl_tp returned False")
+                        # Try to get more details about why it failed
+                        try:
+                            position_info = self.meta_trader.get_position_by_ticket(int(order_id))
+                            if position_info:
+                                logger.warning(f"🔍 Position {order_id} exists but SL modification failed. Current SL: {getattr(position_info, 'sl', 'unknown')}")
+                        except Exception as e:
+                            logger.warning(f"🔍 Could not get position info for {order_id}: {e}")
+                        
+                except Exception as e:
+                    failed_count += 1
+                    logger.debug(f"⚠️ Error updating SL for order {order_id}: {e}")
+                    continue
+            
+            if updated_count > 0:
+                logger.info(f"✅ Updated trailing SL to {new_trailing_sl:.5f} for {updated_count}/{len(active_orders)} orders in cycle {cycle.cycle_id}")
+                # Log each order's new SL for debugging
+                for order in active_orders:
+                    order_id = order.get('ticket') or order.get('order_id')
+                    logger.info(f"📊 Order {order_id} (Grid {order.get('grid_level', '?')}) SL updated to {new_trailing_sl:.5f}")
+                return True
+            else:
+                logger.warning(f"⚠️ Failed to update trailing SL for any orders in cycle {cycle.cycle_id} ({failed_count} failures)")
+                # Log details about why it failed
+                logger.warning(f"🔍 Active orders in cycle: {[o.get('ticket') for o in active_orders]}")
+                return False
+                
+        except Exception as e:
+            logger.error(f"❌ Error updating trailing SL for cycle orders: {e}")
+            return False
+
+    def _force_update_all_orders_sl(self, cycle, new_trailing_sl: float) -> bool:
+        """Force update ALL orders' SL by getting them directly from MT5"""
+        try:
+            logger.info(f"🚀 FORCE updating all orders' SL to {new_trailing_sl:.5f} for cycle {cycle.cycle_id}")
+            
+            # Get all positions from MT5 directly
+            all_positions = self.meta_trader.get_all_positions()
+            if not all_positions:
+                logger.warning("⚠️ No positions found in MT5")
+                return False
+            
+            updated_count = 0
+            
+            # Find positions that belong to this cycle
+            for position in all_positions:
+                if hasattr(position, 'comment') and 'MoveGuard' in str(position.comment):
+                    # This is a MoveGuard position
+                    try:
+                        result = self.meta_trader.modify_position_sl_tp(
+                            ticket=int(position.ticket),
+                            sl=new_trailing_sl,
+                            tp=0.0
+                        )
+                        if result:
+                            updated_count += 1
+                            logger.info(f"✅ FORCE updated SL for position {position.ticket} to {new_trailing_sl:.5f}")
+                        else:
+                            logger.warning(f"⚠️ FORCE update failed for position {position.ticket}")
+                    except Exception as e:
+                        logger.error(f"❌ FORCE update error for position {position.ticket}: {e}")
+            
+            logger.info(f"🚀 FORCE update complete: {updated_count} positions updated")
+            return updated_count > 0
+            
+        except Exception as e:
+            logger.error(f"❌ Error in force update: {e}")
+            return False
 
     def _get_pip_value(self) -> float:
         """Get pip value for MoveGuard"""
@@ -2973,20 +3130,37 @@ class MoveGuard(Strategy):
             # Calculate stop loss and take profit
             pip_value = self._get_pip_value()
             
-            # Determine if this is the first grid order (apply SL only for the first grid)
-            is_first_grid = True
-            if hasattr(cycle, 'grid_data') and isinstance(cycle.grid_data, dict):
-                grid_orders_list = cycle.grid_data.get('grid_orders', []) if isinstance(cycle.grid_data.get('grid_orders'), list) else []
-                if grid_orders_list:
-                    is_first_grid = False
-            first_grid_sl = 0
-            if is_first_grid and initial_stop_loss_pips > 0:
-                first_grid_sl = order_price - (initial_stop_loss_pips * pip_value)
-                # Validate stop loss is reasonable (at least 1 pip away from order price)
-                min_sl_distance = pip_value * 1.0  # 1 pip minimum
-                if order_price - first_grid_sl < min_sl_distance:
-                    first_grid_sl = order_price - min_sl_distance
-                    logger.warning(f"⚠️ Adjusted BUY stop loss to minimum distance: {first_grid_sl:.5f}")
+            # CRITICAL FIX: ALL grid orders should have SL set to current trailing SL
+            # This ensures MT5 protects them even if bot crashes
+            order_sl = 0
+            
+            # Get current trailing SL if it exists
+            if hasattr(cycle, 'trailing_stop_loss') and cycle.trailing_stop_loss is not None and cycle.trailing_stop_loss > 0:
+                # Use existing trailing SL
+                order_sl = cycle.trailing_stop_loss
+                logger.debug(f"📊 Using existing trailing SL for BUY grid order: {order_sl:.5f}")
+            else:
+                # Calculate initial trailing SL based on highest buy price or current price
+                zone_threshold_pips = self.get_cycle_zone_threshold_pips(cycle)
+                upper_boundary = cycle.zone_data.get('upper_boundary', 0.0)
+                
+                if hasattr(cycle, 'highest_buy_price') and cycle.highest_buy_price > 0:
+                    order_sl = cycle.highest_buy_price - (zone_threshold_pips * pip_value)
+                else:
+                    # First order - use order price as reference
+                    order_sl = order_price - (zone_threshold_pips * pip_value)
+                
+                # Cap at upper boundary if zone movement mode requires it
+                if cycle.zone_movement_mode == 'Move Both Sides' or cycle.zone_movement_mode == 'Move Up Only':
+                    order_sl = max(order_sl, upper_boundary)
+                
+                logger.debug(f"📊 Calculated initial trailing SL for BUY grid order: {order_sl:.5f}")
+            
+            # Validate stop loss is reasonable (at least 1 pip away from order price)
+            min_sl_distance = pip_value * 1.0  # 1 pip minimum
+            if order_price - order_sl < min_sl_distance:
+                order_sl = order_price - min_sl_distance
+                logger.warning(f"⚠️ Adjusted BUY stop loss to minimum distance: {order_sl:.5f}")
 
             # Validate order parameters before placement
             if lot_size <= 0:
@@ -2997,14 +3171,14 @@ class MoveGuard(Strategy):
                 logger.error(f"❌ Invalid order price for BUY order: {order_price}")
                 return False
             
-            logger.debug(f"📋 Placing BUY order: symbol={self.symbol}, volume={lot_size}, price={order_price:.5f}, sl={first_grid_sl:.5f}, grid_level={grid_level}")
+            logger.debug(f"📋 Placing BUY order: symbol={self.symbol}, volume={lot_size}, price={order_price:.5f}, sl={order_sl:.5f}, grid_level={grid_level}")
             
             # Place order through MetaTrader using the correct method
             order_result = self.meta_trader.place_buy_order(
                 symbol=self.symbol,
                 volume=lot_size,
                 price=order_price,
-                stop_loss=first_grid_sl,
+                stop_loss=order_sl,
                 take_profit=0,
                 comment=f"MoveGuard_Grid_{grid_level}"
             )
@@ -3118,20 +3292,37 @@ class MoveGuard(Strategy):
             # Calculate stop loss and take profit
             pip_value = self._get_pip_value()
 
-            # Determine if this is the first grid order (apply SL only for the first grid)
-            is_first_grid = True
-            if hasattr(cycle, 'grid_data') and isinstance(cycle.grid_data, dict):
-                grid_orders_list = cycle.grid_data.get('grid_orders', []) if isinstance(cycle.grid_data.get('grid_orders'), list) else []
-                if grid_orders_list:
-                    is_first_grid = False
-            first_grid_sl = 0
-            if is_first_grid and initial_stop_loss_pips > 0:
-                first_grid_sl = order_price + (initial_stop_loss_pips * pip_value)
-                # Validate stop loss is reasonable (at least 1 pip away from order price)
-                min_sl_distance = pip_value * 1.0  # 1 pip minimum
-                if first_grid_sl - order_price < min_sl_distance:
-                    first_grid_sl = order_price + min_sl_distance
-                    logger.warning(f"⚠️ Adjusted SELL stop loss to minimum distance: {first_grid_sl:.5f}")
+            # CRITICAL FIX: ALL grid orders should have SL set to current trailing SL
+            # This ensures MT5 protects them even if bot crashes
+            order_sl = 0
+            
+            # Get current trailing SL if it exists
+            if hasattr(cycle, 'trailing_stop_loss') and cycle.trailing_stop_loss is not None and cycle.trailing_stop_loss > 0:
+                # Use existing trailing SL
+                order_sl = cycle.trailing_stop_loss
+                logger.debug(f"📊 Using existing trailing SL for SELL grid order: {order_sl:.5f}")
+            else:
+                # Calculate initial trailing SL based on lowest sell price or current price
+                zone_threshold_pips = self.get_cycle_zone_threshold_pips(cycle)
+                lower_boundary = cycle.zone_data.get('lower_boundary', 0.0)
+                
+                if hasattr(cycle, 'lowest_sell_price') and cycle.lowest_sell_price < 999999.0:
+                    order_sl = cycle.lowest_sell_price + (zone_threshold_pips * pip_value)
+                else:
+                    # First order - use order price as reference
+                    order_sl = order_price + (zone_threshold_pips * pip_value)
+                
+                # Cap at lower boundary if zone movement mode requires it
+                if cycle.zone_movement_mode == 'Move Both Sides' or cycle.zone_movement_mode == 'Move Down Only':
+                    order_sl = min(order_sl, lower_boundary)
+                
+                logger.debug(f"📊 Calculated initial trailing SL for SELL grid order: {order_sl:.5f}")
+            
+            # Validate stop loss is reasonable (at least 1 pip away from order price)
+            min_sl_distance = pip_value * 1.0  # 1 pip minimum
+            if order_sl - order_price < min_sl_distance:
+                order_sl = order_price + min_sl_distance
+                logger.warning(f"⚠️ Adjusted SELL stop loss to minimum distance: {order_sl:.5f}")
 
             # Validate order parameters before placement
             if lot_size <= 0:
@@ -3142,14 +3333,14 @@ class MoveGuard(Strategy):
                 logger.error(f"❌ Invalid order price for SELL order: {order_price}")
                 return False
             
-            logger.debug(f"📋 Placing SELL order: symbol={self.symbol}, volume={lot_size}, price={order_price:.5f}, sl={first_grid_sl:.5f}, grid_level={grid_level}")
+            logger.debug(f"📋 Placing SELL order: symbol={self.symbol}, volume={lot_size}, price={order_price:.5f}, sl={order_sl:.5f}, grid_level={grid_level}")
             
             # Place order through MetaTrader using the correct method
             order_result = self.meta_trader.place_sell_order(
                 symbol=self.symbol,
                 volume=lot_size,
                 price=order_price,
-                stop_loss=first_grid_sl,
+                stop_loss=order_sl,
                 take_profit=0,
                 comment=f"MoveGuard_Grid_{grid_level}"
             )
