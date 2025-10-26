@@ -5009,7 +5009,7 @@ class MoveGuard(Strategy):
                 }
             })
             
-            cycle.trailing_stop_loss = None
+            cycle.trailing_stop_loss = 0
             
             # Validate distance between boundaries
             distance = new_upper - new_lower
