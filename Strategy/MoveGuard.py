@@ -1723,6 +1723,12 @@ class MoveGuard(Strategy):
             # Get active cycles
             active_cycles = self.multi_cycle_manager.get_all_active_cycles()
             
+            # CRITICAL: Monitor all active orders status across all cycles
+            # This ensures we catch any orders that were closed in MT5
+            for cycle in active_cycles:
+                if cycle.status == 'active':
+                    self._monitor_active_orders_status(cycle)
+            
             # Filter cycles that need processing (smart filtering)
             cycles_to_process = []
             for cycle in active_cycles:
@@ -1832,6 +1838,9 @@ class MoveGuard(Strategy):
              
                     # Monitor pending orders for triggers
                 self._monitor_pending_orders(cycle, current_price)
+                
+                # Monitor active orders status - check if they were closed in MT5
+                self._monitor_active_orders_status(cycle)
                 
                 # Initial order placement: only when price crosses boundaries by entry_interval_pips
                 if active_order_count == 0:
@@ -3733,10 +3742,10 @@ class MoveGuard(Strategy):
                 active_order_count = len([o for o in getattr(cycle, 'orders', []) if o.get('status') == 'active'])
                 # Always start with grid level 0 when no active grid orders exist
                 if active_order_count == 0:
-                    next_level = 1  # Start with grid level 0
+                    next_level = 0  # Start with grid level 0
                     logger.info(f"🔄 BUY Grid: Starting with grid level 0 (no active orders)")
                 else:
-                    next_level = active_order_count  # Next level to place
+                    next_level = active_order_count -1 # Next level to place
                     logger.debug(f"📊 BUY Grid: Next level is {next_level} (active orders: {active_order_count})")
                 
                 # Only place the exact number of pending orders we need
@@ -3749,7 +3758,8 @@ class MoveGuard(Strategy):
                         continue
                     
                     # Calculate target price for this level
-                    target_price = grid_start_price + (grid_interval_pips * target_level * pip_value)
+                    
+                    target_price = grid_start_price + (grid_interval_pips * (target_level+1) * pip_value)
                     
                     # Enhanced retry logic for BUY orders
                     success = False
@@ -3767,13 +3777,13 @@ class MoveGuard(Strategy):
                             if not success and retry_count < max_retries:
                                 # Get fresh ask price for retry
                                 ask = self.meta_trader.get_ask(self.symbol)
-                                target_price = ask + (grid_interval_pips * target_level * pip_value)
+                                target_price = ask + (grid_interval_pips * (target_level+1) * pip_value)
                                 logger.warning(f"⚠️ BUY level {target_level} failed, retrying with ask price {ask:.5f}, new target {target_price:.5f}")
                                 success = self._place_pending_grid_order(cycle, target_level, target_price, 'BUY', ask)
                         else:
                             # Target price is not above current price, use ask price
                             ask = self.meta_trader.get_ask(self.symbol)
-                            target_price = ask + (grid_interval_pips * target_level * pip_value)
+                            target_price = ask + (grid_interval_pips * (target_level+1) * pip_value)
                             logger.info(f"🔄 BUY level {target_level} price too low, using ask price {ask:.5f}, target {target_price:.5f} (attempt {retry_count}/{max_retries})")
                             success = self._place_pending_grid_order(cycle, target_level, target_price, 'BUY', ask)
                     
@@ -3800,10 +3810,10 @@ class MoveGuard(Strategy):
                 active_order_count = len([o for o in getattr(cycle, 'orders', []) if o.get('status') == 'active'])
                 # Always start with grid level 0 when no active grid orders exist
                 if active_order_count == 0:
-                    next_level = 1 # Start with grid level 0
+                    next_level = 0 # Start with grid level 0
                     logger.info(f"🔄 SELL Grid: Starting with grid level 0 (no active orders)")
                 else:
-                    next_level = active_order_count  # Next level to place
+                    next_level = active_order_count -1 # Next level to place
                     logger.debug(f"📊 SELL Grid: Next level is {next_level} (active orders: {active_order_count})")
                 
                 # Only place the exact number of pending orders we need
@@ -3814,9 +3824,8 @@ class MoveGuard(Strategy):
                     # Skip if we already have a pending order for this level
                     if target_level in cycle.pending_order_levels:
                         continue
-                    
                     # Calculate target price for this level
-                    target_price = grid_start_price - (grid_interval_pips * target_level * pip_value)
+                    target_price = grid_start_price - (grid_interval_pips * (target_level+1) * pip_value)
                     
                     # Enhanced retry logic for SELL orders
                     success = False
@@ -3834,14 +3843,14 @@ class MoveGuard(Strategy):
                             if not success and retry_count < max_retries:
                                 # Get fresh bid price for retry
                                 bid = self.meta_trader.get_bid(self.symbol)
-                                target_price = bid - (grid_interval_pips * target_level * pip_value)
+                                target_price = bid - (grid_interval_pips * (target_level+1) * pip_value)
                                 logger.warning(f"⚠️ SELL level {target_level} failed, retrying with bid price {bid:.5f}, new target {target_price:.5f}")
                                 success = self._place_pending_grid_order(cycle, target_level, target_price, 'SELL', bid)
 
                         else:
                             # Target price is not below current price, use bid price
                             bid = self.meta_trader.get_bid(self.symbol)
-                            target_price = bid - (grid_interval_pips * target_level * pip_value)
+                            target_price = bid - (grid_interval_pips * (target_level+1) * pip_value)
                             logger.info(f"🔄 SELL level {target_level} price too high, using bid price {bid:.5f}, target {target_price:.5f} (attempt {retry_count}/{max_retries})")
                             success = self._place_pending_grid_order(cycle, target_level, target_price, 'SELL', bid)
                     
@@ -4614,6 +4623,147 @@ class MoveGuard(Strategy):
         except Exception as e:
             logger.error(f"❌ Error syncing pending orders from PocketBase: {str(e)}")
             return False
+
+    def _monitor_active_orders_status(self, cycle) -> bool:
+        """Monitor active orders and update status to 'closed' when they're closed in MT5"""
+        try:
+            if not hasattr(cycle, 'orders') or not cycle.orders:
+                return True
+            
+            # Get all active orders (status = 'active')
+            active_orders = [order for order in cycle.orders if order.get('status') == 'active']
+            
+            if not active_orders:
+                return True
+            
+            closed_orders_count = 0
+            
+            # Check each active order to see if it still exists in MT5
+            for order in active_orders:
+                order_id = order.get('order_id') or order.get('ticket')
+                if not order_id:
+                    continue
+                
+                try:
+                    # Check if the order still exists as a position in MT5
+                    position = self.meta_trader.get_position_by_ticket(int(order_id))
+                    
+                    if not position or len(position) == 0:
+                        # Order no longer exists in MT5 - it was closed
+                        order['status'] = 'closed'
+                        order['closed_at'] = datetime.datetime.now().isoformat()
+                        order['closed_reason'] = 'mt5_position_closed'
+                        closed_orders_count += 1
+                        
+                        # Log the closure
+                        direction = order.get('direction', 'UNKNOWN')
+                        grid_level = order.get('grid_level', 'N/A')
+                        logger.info(f"🔍 Order {order_id} ({direction}, level {grid_level}) was closed in MT5 - status updated to 'closed'")
+                        
+                        # Update profit data if available
+                        try:
+                            # Try to get final profit data before marking as closed
+                            order_profit = self.meta_trader.get_order_profit(order_id)
+                            if order_profit:
+                                order['profit'] = order_profit.get('profit', 0.0)
+                                order['profit_pips'] = order_profit.get('profit_pips', 0.0)
+                                logger.info(f"📊 Final profit for closed order {order_id}: ${order['profit']:.2f} ({order['profit_pips']:.1f} pips)")
+                        except Exception as profit_error:
+                            logger.debug(f"Could not get final profit for order {order_id}: {profit_error}")
+                    
+                except Exception as e:
+                    logger.error(f"❌ Error checking order {order_id} status in MT5: {str(e)}")
+                    continue
+            
+            # If any orders were closed, sync to PocketBase and log status
+            if closed_orders_count > 0:
+                logger.info(f"📊 Cycle {cycle.cycle_id}: {closed_orders_count} orders were closed in MT5 and status updated")
+                
+                # Log comprehensive order lifecycle status
+                self._log_order_lifecycle_status(cycle)
+                
+                # Sync the updated order statuses to PocketBase
+                try:
+                    self._update_cycle_in_database(cycle, force_update=True)
+                    logger.debug(f"✅ Synced closed order statuses to PocketBase for cycle {cycle.cycle_id}")
+                except Exception as sync_error:
+                    logger.warning(f"⚠️ Failed to sync closed order statuses to PocketBase: {sync_error}")
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"❌ Error monitoring active orders status for cycle {cycle.cycle_id}: {str(e)}")
+            return False
+
+    def _get_order_status_summary(self, cycle) -> dict:
+        """Get comprehensive order status summary for a cycle"""
+        try:
+            if not hasattr(cycle, 'orders') or not cycle.orders:
+                return {
+                    'total_orders': 0,
+                    'pending_orders': 0,
+                    'active_orders': 0,
+                    'closed_orders': 0,
+                    'cancelled_orders': 0
+                }
+            
+            summary = {
+                'total_orders': len(cycle.orders),
+                'pending_orders': 0,
+                'active_orders': 0,
+                'closed_orders': 0,
+                'cancelled_orders': 0
+            }
+            
+            for order in cycle.orders:
+                status = order.get('status', 'unknown')
+                if status == 'pending':
+                    summary['pending_orders'] += 1
+                elif status == 'active':
+                    summary['active_orders'] += 1
+                elif status == 'closed':
+                    summary['closed_orders'] += 1
+                elif status == 'cancelled':
+                    summary['cancelled_orders'] += 1
+            
+            return summary
+            
+        except Exception as e:
+            logger.error(f"❌ Error getting order status summary for cycle {cycle.cycle_id}: {str(e)}")
+            return {
+                'total_orders': 0,
+                'pending_orders': 0,
+                'active_orders': 0,
+                'closed_orders': 0,
+                'cancelled_orders': 0
+            }
+
+    def _log_order_lifecycle_status(self, cycle):
+        """Log comprehensive order lifecycle status for monitoring"""
+        try:
+            if not hasattr(cycle, 'cycle_id'):
+                return
+            
+            # Get order status summary
+            summary = self._get_order_status_summary(cycle)
+            
+            # Get pending orders count
+            pending_count = len(getattr(cycle, 'pending_orders', []))
+            
+            # Log comprehensive status
+            logger.info(f"📊 Cycle {cycle.cycle_id} Order Status Summary:")
+            logger.info(f"   📋 Total Orders: {summary['total_orders']}")
+            logger.info(f"   ⏳ Pending Orders: {summary['pending_orders']} (tracked: {pending_count})")
+            logger.info(f"   🟢 Active Orders: {summary['active_orders']}")
+            logger.info(f"   🔴 Closed Orders: {summary['closed_orders']}")
+            logger.info(f"   ❌ Cancelled Orders: {summary['cancelled_orders']}")
+            
+            # Log any discrepancies
+            if summary['pending_orders'] != pending_count:
+                logger.warning(f"⚠️ Pending order count mismatch: orders list={summary['pending_orders']}, pending_orders list={pending_count}")
+            
+        except Exception as e:
+            logger.error(f"❌ Error logging order lifecycle status for cycle {cycle.cycle_id}: {str(e)}")
 
     def _restore_pending_orders_for_all_cycles(self):
         """Restore pending orders for all existing cycles from PocketBase"""

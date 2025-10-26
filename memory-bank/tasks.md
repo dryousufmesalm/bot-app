@@ -2,6 +2,100 @@
 
 ## 🚀 NEW FEATURE IMPLEMENTATION COMPLETED ✅
 
+### MoveGuard Active Order Status Tracking ✅ COMPLETE
+- **Feature**: Track pending orders status and update to 'closed' when they're closed in MT5
+- **Priority**: High - Complete order lifecycle management
+- **Status**: IMPLEMENTED - Comprehensive order status tracking with MT5 integration
+- **Date**: 2025-01-27
+
+#### **Feature Overview**
+📌 **Feature**: Added comprehensive order status tracking to monitor when active orders are closed in MT5 and update their status to 'closed'
+🎯 **Purpose**: Complete order lifecycle management from pending → active → closed
+💡 **Benefit**: Accurate order status tracking, proper cleanup, better analytics and monitoring
+
+#### **Implementation Details**
+🛠️ **How It Works**:
+1. **Active Order Monitoring**: `_monitor_active_orders_status()` method checks all active orders in MT5
+2. **Status Detection**: Uses `get_position_by_ticket()` to check if orders still exist in MT5
+3. **Status Update**: Updates order status from 'active' to 'closed' when orders are no longer found
+4. **Profit Capture**: Captures final profit data before marking orders as closed
+5. **Database Sync**: Syncs updated order statuses to PocketBase for persistence
+6. **Comprehensive Logging**: Detailed logging for monitoring and debugging
+
+🎯 **System Benefits**:
+- **Before**: No tracking of when active orders are closed by broker
+- **After**: Complete order lifecycle tracking with automatic status updates
+- **Before**: Orders could remain in 'active' status even after being closed
+- **After**: Orders automatically updated to 'closed' status when closed in MT5
+- **Result**: Accurate order status tracking, better analytics, proper cleanup
+
+#### **Key Features**
+✅ **Active Order Monitoring**: Real-time monitoring of all active orders across all cycles
+✅ **MT5 Integration**: Uses MetaTrader API to check order existence
+✅ **Status Transitions**: Proper status changes from 'active' → 'closed'
+✅ **Profit Capture**: Captures final profit data before status update
+✅ **Database Sync**: Full synchronization with PocketBase for persistence
+✅ **Comprehensive Logging**: Detailed logging with order lifecycle status summaries
+✅ **Error Handling**: Robust error handling with graceful fallbacks
+
+#### **Implementation Details**
+```python
+# Active order status monitoring
+def _monitor_active_orders_status(self, cycle) -> bool:
+    # Get all active orders (status = 'active')
+    active_orders = [order for order in cycle.orders if order.get('status') == 'active']
+    
+    # Check each active order to see if it still exists in MT5
+    for order in active_orders:
+        position = self.meta_trader.get_position_by_ticket(int(order_id))
+        
+        if not position or len(position) == 0:
+            # Order no longer exists in MT5 - it was closed
+            order['status'] = 'closed'
+            order['closed_at'] = datetime.datetime.now().isoformat()
+            order['closed_reason'] = 'mt5_position_closed'
+            
+            # Capture final profit data
+            order_profit = self.meta_trader.get_order_profit(order_id)
+            if order_profit:
+                order['profit'] = order_profit.get('profit', 0.0)
+                order['profit_pips'] = order_profit.get('profit_pips', 0.0)
+
+# Integration with main processing loop
+async def _process_strategy_logic(self, market_data: dict):
+    # CRITICAL: Monitor all active orders status across all cycles
+    for cycle in active_cycles:
+        if cycle.status == 'active':
+            self._monitor_active_orders_status(cycle)
+```
+
+#### **Order Lifecycle Flow**
+1. **Creation**: Order created and added to both `pending_orders` and `orders` with status 'pending'
+2. **Activation**: When order gets triggered, status changes to 'active' in main orders list
+3. **Monitoring**: System continuously monitors active orders in MT5
+4. **Closure Detection**: When order is closed in MT5, system detects it's no longer there
+5. **Status Update**: Order status changes to 'closed' with timestamp and reason
+6. **Profit Capture**: Final profit data is captured and stored
+7. **Database Sync**: All changes synced to PocketBase for persistence
+
+#### **Verification Results**
+✅ **Status Detection**: System successfully detects when orders are closed in MT5
+✅ **Status Updates**: Order status correctly updated from 'active' to 'closed'
+✅ **Profit Capture**: Final profit data properly captured before status update
+✅ **Database Sync**: Changes successfully synced to PocketBase
+✅ **Error Handling**: Robust error handling with comprehensive logging
+✅ **Order Lifecycle**: Complete order lifecycle from creation to closure
+
+#### **Files Modified**
+- `Strategy/MoveGuard.py` - Added `_monitor_active_orders_status()`, `_get_order_status_summary()`, and `_log_order_lifecycle_status()` methods (lines 4619-4765)
+- `Strategy/MoveGuard.py` - Integrated active order monitoring into main processing loop (lines 1726-1730, 1836-1837)
+
+**Status**: ✅ NEW FEATURE COMPLETE - MoveGuard active order status tracking implemented with comprehensive MT5 integration
+
+---
+
+## 🚀 NEW FEATURE IMPLEMENTATION COMPLETED ✅
+
 ### MoveGuard Order Movement from Pending to Active Orders ✅ COMPLETE
 - **Feature**: Orders now move from `self.pending_orders` to `self.orders` when activated
 - **Priority**: High - Order lifecycle management enhancement
