@@ -778,6 +778,123 @@ class MetaTrader:
             logger.error(f"Error in close_order: {e}")
             return None
 
+    def cancel_pending_order(self, order_id, symbol):
+        """Cancel a pending order"""
+        try:
+            request = {
+                "action": Mt5.TRADE_ACTION_REMOVE,
+                "order": order_id,
+                "symbol": symbol
+            }
+            result = Mt5.order_send(request)
+            if result is None:
+                logger.error(f"order_send returned None for cancel order {order_id}")
+                return None
+            if result.retcode != Mt5.TRADE_RETCODE_DONE:
+                logger.error(f"Failed to cancel order {order_id}, retcode={result.retcode}")
+                return None
+            logger.info(f"Successfully cancelled pending order {order_id}")
+            return result
+        except Exception as e:
+            logger.error(f"Error cancelling pending order {order_id}: {e}")
+            return None
+
+    def place_pending_buy_order(self, symbol, target_price, current_price, volume, sl=0, tp=0, comment=None, force_buy_stop=False):
+        """Place pending BUY order - auto-selects BUY_STOP or BUY_LIMIT based on price position, or force BUY_STOP"""
+        try:
+            # Validate SL value - must be a proper price, not pips
+            if sl > 0 and sl < 1000:  # Likely pips instead of price
+                logger.warning(f"SL value {sl} appears to be in pips, not price. Setting SL to 0 for pending order.")
+                sl = 0
+            
+            # Determine order type based on price position or force BUY_STOP
+            if force_buy_stop or target_price > current_price:
+                # Always use BUY_STOP when forced, or when price needs to go up to trigger
+                order_type = "BUY_STOP"
+                result = self.buy_stop(
+                    symbol=symbol,
+                    price=target_price,
+                    volume=volume,
+                    magic=self.magic_number if hasattr(self, 'magic_number') else 123456,
+                    sl=sl,
+                    tp=tp,
+                    sltp_type="PRICE",
+                    slippage=10,
+                    comment=comment or f"{order_type}_Grid"
+                )
+            else:
+                # Price needs to come down to trigger - use BUY_LIMIT
+                order_type = "BUY_LIMIT"
+                result = self.buy_limit(
+                    symbol=symbol,
+                    price=target_price,
+                    volume=volume,
+                    magic=self.magic_number if hasattr(self, 'magic_number') else 123456,
+                    sl=sl,
+                    tp=tp,
+                    sltp_type="PRICE",
+                    slippage=10,
+                    comment=comment or f"{order_type}_Grid"
+                )
+            
+            if result:
+                logger.info(f"Placed {order_type} order at {target_price} for {symbol}")
+            else:
+                logger.error(f"Failed to place {order_type} order at {target_price} for {symbol}")
+            return result
+            
+        except Exception as e:
+            logger.error(f"Error placing pending BUY order: {e}")
+            return None
+
+    def place_pending_sell_order(self, symbol, target_price, current_price, volume, sl=0, tp=0, comment=None, force_sell_stop=False):
+        """Place pending SELL order - auto-selects SELL_STOP or SELL_LIMIT based on price position, or force SELL_STOP"""
+        try:
+            # Validate SL value - must be a proper price, not pips
+            if sl > 0 and sl < 1000:  # Likely pips instead of price
+                logger.warning(f"SL value {sl} appears to be in pips, not price. Setting SL to 0 for pending order.")
+                sl = 0
+            
+            # Determine order type based on price position or force SELL_STOP
+            if force_sell_stop or target_price < current_price:
+                # Always use SELL_STOP when forced, or when price needs to go down to trigger
+                order_type = "SELL_STOP"
+                result = self.sell_stop(
+                    symbol=symbol,
+                    price=target_price,
+                    volume=volume,
+                    magic=self.magic_number if hasattr(self, 'magic_number') else 123456,
+                    sl=sl,
+                    tp=tp,
+                    sltp_type="PRICE",
+                    slippage=10,
+                    comment=comment or f"{order_type}_Grid"
+                )
+            else:
+                # Price needs to go up to trigger - use SELL_LIMIT
+                order_type = "SELL_LIMIT"
+                result = self.sell_limit(
+                    symbol=symbol,
+                    price=target_price,
+                    volume=volume,
+                    magic=self.magic_number if hasattr(self, 'magic_number') else 123456,
+                    sl=sl,
+                    tp=tp,
+                    sltp_type="PRICE",
+                    slippage=10,
+                    comment=comment or f"{order_type}_Grid"
+                )
+            
+            if result:
+                logger.info(f"Placed {order_type} order at {target_price} for {symbol}")
+            else:
+                logger.error(f"Failed to place {order_type} order at {target_price} for {symbol}")
+            return result
+            
+        except Exception as e:
+            logger.error(f"Error placing pending SELL order: {e}")
+            return None
+
     def modify_position_sl_tp(self, ticket: int, sl: float = 0.0, tp: float = 0.0):
         """Modify SL/TP of an existing open position by ticket.
 

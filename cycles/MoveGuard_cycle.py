@@ -642,8 +642,8 @@ class MoveGuardCycle(cycle):
             'tp': ['tp', 'take_profit'],
             'magic_number': ['magic_number', 'magic'],
             'comment': ['comment', 'description'],
-            'open_time': ['open_time', 'placed_at', 'open_datetime'],
-            'placed_at': ['placed_at', 'open_time', 'placed_datetime']
+            'open_time': ['time_setup', 'time_setup_msc', 'time', 'open_time', 'placed_at', 'open_datetime'],
+            'placed_at': ['time_setup', 'time_setup_msc', 'time', 'placed_at', 'open_time', 'placed_datetime']
         }
         
         for target_field, source_fields in field_mappings.items():
@@ -655,6 +655,9 @@ class MoveGuardCycle(cycle):
                             order_data[target_field] = str(value)
                         elif target_field in ['ticket', 'magic_number']:
                             order_data[target_field] = int(value)
+                        elif target_field in ['open_time', 'placed_at']:
+                            # Convert MT5 timestamp to ISO format
+                            order_data[target_field] = self._convert_timestamp_to_iso(value)
                         else:
                             order_data[target_field] = self._safe_float_conversion(value)
                         break
@@ -706,6 +709,31 @@ class MoveGuardCycle(cycle):
             return float(value)
         except (ValueError, TypeError):
             return default
+    
+    def _convert_timestamp_to_iso(self, timestamp_value) -> str:
+        """Convert MT5 timestamp to ISO format string"""
+        try:
+            # If already a string (ISO format), return as-is
+            if isinstance(timestamp_value, str):
+                return timestamp_value
+            
+            # If it's a datetime object, convert to ISO string
+            if isinstance(timestamp_value, datetime.datetime):
+                return timestamp_value.isoformat()
+            
+            # If it's a numeric timestamp (Unix time), convert to datetime then ISO
+            if isinstance(timestamp_value, (int, float)):
+                # MT5 timestamps are Unix timestamps (seconds since epoch)
+                dt = datetime.datetime.fromtimestamp(timestamp_value)
+                return dt.isoformat()
+            
+            # Fallback to current time if conversion fails
+            logger.warning(f"Could not convert timestamp value {timestamp_value} to ISO format, using current time")
+            return datetime.datetime.now().isoformat()
+            
+        except Exception as e:
+            logger.error(f"Error converting timestamp to ISO: {e}")
+            return datetime.datetime.now().isoformat()
 
     # ==================== DATABASE OPERATIONS ====================
 
