@@ -97,6 +97,11 @@ class MoveGuardCycle(cycle):
             self.completed_orders = self._parse_json_field(cycle_data.get('completed_orders'), [])
             self.done_price_levels = self._parse_json_field(cycle_data.get('done_price_levels'), [])
             
+            # Load pending orders data for MoveGuard strategy
+            self.pending_orders = self._parse_json_field(cycle_data.get('pending_orders'), [])
+            pending_levels_data = self._parse_json_field(cycle_data.get('pending_order_levels'), [])
+            self.pending_order_levels = set(pending_levels_data) if isinstance(pending_levels_data, list) else set()
+            
             # Direction and zone settings
             self.direction = cycle_data.get('direction', 'BUY')
             self.current_direction = cycle_data.get('current_direction', self.direction)
@@ -212,6 +217,10 @@ class MoveGuardCycle(cycle):
         self.orders_config = {}
         self.cycle_type = 'MoveGuard'
         self.magic_number = 0
+        
+        # Pending orders tracking for MoveGuard strategy
+        self.pending_orders = []
+        self.pending_order_levels = set()
         
         # Cycle-specific configuration
         self.cycle_config = {}
@@ -873,6 +882,8 @@ class MoveGuardCycle(cycle):
                 'orders': json.dumps(getattr(self, 'active_orders', []) + getattr(self, 'completed_orders', [])),
                 'active_orders': json.dumps(getattr(self, 'active_orders', [])),
                 'completed_orders': json.dumps(getattr(self, 'completed_orders', [])),
+                'pending_orders': json.dumps(getattr(self, 'pending_orders', [])),
+                'pending_order_levels': json.dumps(list(getattr(self, 'pending_order_levels', set()))),
                 'grid_data': json.dumps(getattr(self, 'grid_data', {})),
                 'zone_data': json.dumps(getattr(self, 'zone_data', {})),
                 'recovery_data': json.dumps(getattr(self, 'recovery_data', {})),

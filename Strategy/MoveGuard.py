@@ -1872,6 +1872,12 @@ class MoveGuard(Strategy):
                             # logger.info(f"🔄 MoveGuard: Price {current_price:.5f} is within the zone boundaries, skipping initial order placement")
                             # continue
                     if len(cycle.pending_orders) > 0:
+                        # Validate pending orders grid levels - cancel if invalid
+                        if not self._validate_pending_orders_grid_levels(cycle):
+                            logger.warning(f"🚨 Invalid pending orders grid levels detected - cancelling all pending orders")
+                            self._cancel_cycle_pending_orders(cycle)
+                            continue
+                        
                         # Enhanced direction determination for pending orders scenario
                         new_direction = self._determine_new_direction_after_all_orders_closed(cycle, current_price)
                         if len(cycle.pending_orders) <5:
@@ -2125,6 +2131,16 @@ class MoveGuard(Strategy):
                     cycle.grid_data['grid_orders'].append(order_info)
                     
                     logger.info(f"✅ MoveGuard initial {direction} order placed as pending: ID {order_id}, Price {order_price:.5f}")
+                    
+                    # IMMEDIATELY place 5 pending orders to maintain grid ahead
+                    logger.info(f"🚀 AUTOMATIC GRID SETUP: Placing 5 pending orders after initial order placement")
+                    grid_success = self._maintain_pending_grid_orders(cycle, order_price, 5)
+                    
+                    if grid_success:
+                        logger.info(f"✅ SUCCESS: 5 pending orders placed automatically after initial order")
+                    else:
+                        logger.warning(f"⚠️ WARNING: Failed to place pending orders after initial order")
+                    
                     return True
                 else:
                     logger.error("❌ Failed to extract order ID from pending order result")
@@ -3699,8 +3715,86 @@ class MoveGuard(Strategy):
             logger.error(f"❌ Error placing MoveGuard grid SELL order: {str(e)}")
             return False
 
-    def _maintain_pending_grid_orders(self, cycle, current_price: float, num_levels: int = 3) -> bool:
-        """Maintain specified number of pending orders ahead of current position - only place once per level"""
+    def _level_already_exists(self, cycle, target_level: int) -> bool:
+        """Check if a grid level already exists in pending or active orders"""
+        # Check pending orders
+        if target_level in cycle.pending_order_levels:
+            return True
+        
+        # Check active orders
+        for order in cycle.orders:
+            if order.get('status') == 'active' and order.get('grid_level') == target_level:
+                return True
+        
+        return False
+
+    def _calculate_pending_orders_needed(self, cycle) -> int:
+        """Calculate how many pending orders are needed to maintain 5 pending orders"""
+        current_pending_count = len(cycle.pending_orders)
+        target_pending_count = 5
+        return max(0, target_pending_count - current_pending_count)
+
+    def _get_next_grid_level(self, cycle) -> int:
+        """Get the next grid level to place based on existing levels - starts from grid level 1"""
+        # Find highest existing level
+        max_level = 0  # Start from 0 instead of -1 since we want to start from grid level 1
+        
+        # Check pending orders
+        for level in cycle.pending_order_levels:
+            max_level = max(max_level, level)
+        
+        # Check active orders
+        for order in cycle.orders:
+            if order.get('status') == 'active':
+                grid_level = order.get('grid_level', 0)
+                max_level = max(max_level, grid_level)
+        
+        # Return next level, ensuring we start from grid level 1
+        return max(max_level + 1, 1)
+
+    def _validate_pending_orders_grid_levels(self, cycle) -> bool:
+        """Validate that pending orders start from grid levels 1 to 5 when no active orders exist"""
+        try:
+            # Check if there are no active orders
+            active_orders = [o for o in cycle.orders if o.get('status') == 'active']
+            if len(active_orders) > 0:
+                # If there are active orders, validation passes
+                return True
+            
+            # If no active orders, check pending orders grid levels
+            if len(cycle.pending_orders) == 0:
+                # No pending orders, validation passes
+                return True
+            
+            # Get all pending order grid levels
+            pending_levels = []
+            for order in cycle.pending_orders:
+                grid_level = order.get('grid_level', 0)
+                pending_levels.append(grid_level)
+            
+            # Sort the levels
+            pending_levels.sort()
+            
+            # Check if pending orders start from 1 to 5 (or less if fewer than 5 orders)
+            expected_levels = list(range(1, min(6, len(pending_levels) + 1)))
+            
+            # If pending levels don't match expected levels 1, 2, 3, 4, 5, validation fails
+            if pending_levels != expected_levels:
+                logger.warning(f"⚠️ Pending orders grid levels validation failed:")
+                logger.warning(f"   - Expected levels: {expected_levels}")
+                logger.warning(f"   - Actual levels: {pending_levels}")
+                logger.warning(f"   - No active orders found, cancelling all pending orders")
+                return False
+            
+            logger.debug(f"✅ Pending orders grid levels validation passed: {pending_levels}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"❌ Error validating pending orders grid levels: {str(e)}")
+            return False
+
+    def _maintain_pending_grid_orders(self, cycle, current_price: float, num_levels: int = 5) -> bool:
+        """Maintain exactly 5 pending orders ahead of current position - check for existing levels"""
         try:
             if not hasattr(cycle, 'pending_orders'):
                 cycle.pending_orders = []
@@ -3709,13 +3803,20 @@ class MoveGuard(Strategy):
             # Sync pending orders from PocketBase to ensure we have latest data
             self._sync_pending_orders_from_pocketbase(cycle)
             
-            # Check if we already have enough pending orders
-            current_pending_count = len(cycle.pending_orders)
-            if current_pending_count >= num_levels:
-                logger.debug(f"📊 Grid maintenance: Already have {current_pending_count}/{num_levels} pending orders, no need to place more")
+            # Validate pending orders grid levels before proceeding
+            if not self._validate_pending_orders_grid_levels(cycle):
+                logger.warning(f"🚨 Invalid pending orders grid levels detected in grid maintenance - cancelling all pending orders")
+                self._cancel_cycle_pending_orders(cycle)
+                return False
+            
+            # Calculate how many pending orders we need to maintain exactly 5
+            pending_orders_needed = self._calculate_pending_orders_needed(cycle)
+            
+            if pending_orders_needed <= 0:
+                logger.debug(f"📊 Grid maintenance: Already have sufficient pending orders ({len(cycle.pending_orders)}/5)")
                 return True
             
-            logger.info(f"📋 AUTOMATIC GRID MAINTENANCE: Need to place {num_levels - current_pending_count} more pending orders (current: {current_pending_count})")
+            logger.info(f"📋 AUTOMATIC GRID MAINTENANCE: Need to place {pending_orders_needed} more pending orders to maintain 5 pending orders (current: {len(cycle.pending_orders)})")
             
             # Get grid parameters
             pip_value = self._get_pip_value()
@@ -3738,34 +3839,37 @@ class MoveGuard(Strategy):
                 else:
                     grid_start_price = upper + (entry_interval_pips * pip_value)
                 
-                # Calculate which levels need pending orders
-                active_order_count = len([o for o in getattr(cycle, 'orders', []) if o.get('status') == 'active'])
-                # Always start with grid level 0 when no active grid orders exist
-                if active_order_count == 0:
-                    next_level = 0  # Start with grid level 0
-                    logger.info(f"🔄 BUY Grid: Starting with grid level 0 (no active orders)")
-                else:
-                    next_level = active_order_count -1 # Next level to place
-                    logger.debug(f"📊 BUY Grid: Next level is {next_level} (active orders: {active_order_count})")
-                
-                # Only place the exact number of pending orders we need
-                levels_to_place = num_levels - current_pending_count
-                for level_offset in range(1, levels_to_place +1):
-                    target_level = next_level + level_offset-1
+                # Place pending orders one by one, checking for existing levels
+                for _ in range(pending_orders_needed):
+                    next_level = self._get_next_grid_level(cycle)
                     
-                    # Skip if we already have a pending order for this level
-                    if target_level in cycle.pending_order_levels:
+                    # Check if this level already exists
+                    if self._level_already_exists(cycle, next_level):
+                        logger.debug(f"📊 Level {next_level} already exists, skipping")
                         continue
                     
-                    # Calculate target price for this level
+                    target_level = next_level
                     
-                    target_price = grid_start_price + (grid_interval_pips * (target_level+1) * pip_value)
+                    # Immediately add this level to pending_order_levels to prevent duplicates in the same batch
+                    cycle.pending_order_levels.add(target_level)
+                    
+                    # Calculate target price for this level
+                    # For BUY orders: grid level 1 should be at grid_start_price, level 2 should be grid_start_price + grid_interval_pips
+                    target_price = grid_start_price + (grid_interval_pips * (target_level - 1) * pip_value)
+                    
+                    # Debug logging to identify price calculation issues
+                    logger.info(f"🔍 BUY Grid Level {target_level} Price Calculation:")
+                    logger.info(f"   - grid_start_price: {grid_start_price:.5f}")
+                    logger.info(f"   - grid_interval_pips: {grid_interval_pips}")
+                    logger.info(f"   - pip_value: {pip_value:.5f}")
+                    logger.info(f"   - target_level: {target_level}")
+                    logger.info(f"   - calculated target_price: {target_price:.5f}")
                     
                     # Enhanced retry logic for BUY orders
                     success = False
                     retry_count = 0
                     max_retries = 3
-                    
+
                     while not success and retry_count < max_retries:
                         retry_count += 1
                         
@@ -3777,21 +3881,24 @@ class MoveGuard(Strategy):
                             if not success and retry_count < max_retries:
                                 # Get fresh ask price for retry
                                 ask = self.meta_trader.get_ask(self.symbol)
-                                target_price = ask + (grid_interval_pips * (target_level+1) * pip_value)
+                                target_price = ask + (grid_interval_pips * (target_level - 1) * pip_value)
+                                grid_start_price = ask
                                 logger.warning(f"⚠️ BUY level {target_level} failed, retrying with ask price {ask:.5f}, new target {target_price:.5f}")
                                 success = self._place_pending_grid_order(cycle, target_level, target_price, 'BUY', ask)
                         else:
                             # Target price is not above current price, use ask price
                             ask = self.meta_trader.get_ask(self.symbol)
-                            target_price = ask + (grid_interval_pips * (target_level+1) * pip_value)
+                            target_price = ask + (grid_interval_pips * (target_level - 1) * pip_value)
+                            grid_start_price = ask 
                             logger.info(f"🔄 BUY level {target_level} price too low, using ask price {ask:.5f}, target {target_price:.5f} (attempt {retry_count}/{max_retries})")
                             success = self._place_pending_grid_order(cycle, target_level, target_price, 'BUY', ask)
                     
                     if not success:
                         logger.error(f"❌ Failed to place BUY level {target_level} after {max_retries} attempts - stopping grid placement")
+                        # Remove the level from pending_order_levels since order placement failed
+                        cycle.pending_order_levels.discard(target_level)
                         # cancel all pending orders
-                        self._cancel_pending_grid_orders(cycle)
-                        break  # Stop placing more orders if this one fails
+                        self._cancel_cycle_pending_orders(cycle)
                     else:
                         logger.info(f"✅ Successfully placed BUY level {target_level} at price {target_price:.5f}")
             elif cycle.direction == 'SELL':
@@ -3806,26 +3913,31 @@ class MoveGuard(Strategy):
                 else:
                     grid_start_price = lower - (entry_interval_pips * pip_value)
                 
-                # Calculate which levels need pending orders
-                active_order_count = len([o for o in getattr(cycle, 'orders', []) if o.get('status') == 'active'])
-                # Always start with grid level 0 when no active grid orders exist
-                if active_order_count == 0:
-                    next_level = 0 # Start with grid level 0
-                    logger.info(f"🔄 SELL Grid: Starting with grid level 0 (no active orders)")
-                else:
-                    next_level = active_order_count -1 # Next level to place
-                    logger.debug(f"📊 SELL Grid: Next level is {next_level} (active orders: {active_order_count})")
-                
-                # Only place the exact number of pending orders we need
-                levels_to_place = num_levels - current_pending_count
-                for level_offset in range(1, levels_to_place +1):
-                    target_level = next_level + level_offset-1
+                # Place pending orders one by one, checking for existing levels
+                for _ in range(pending_orders_needed):
+                    next_level = self._get_next_grid_level(cycle)
                     
-                    # Skip if we already have a pending order for this level
-                    if target_level in cycle.pending_order_levels:
+                    # Check if this level already exists
+                    if self._level_already_exists(cycle, next_level):
+                        logger.debug(f"📊 Level {next_level} already exists, skipping")
                         continue
+                    
+                    target_level = next_level
+                    
+                    # Immediately add this level to pending_order_levels to prevent duplicates in the same batch
+                    cycle.pending_order_levels.add(target_level)
+                    
                     # Calculate target price for this level
-                    target_price = grid_start_price - (grid_interval_pips * (target_level+1) * pip_value)
+                    # For SELL orders: grid level 1 should be at grid_start_price, level 2 should be grid_start_price - grid_interval_pips
+                    target_price = grid_start_price - (grid_interval_pips * (target_level - 1) * pip_value)
+                    
+                    # Debug logging to identify price calculation issues
+                    logger.info(f"🔍 SELL Grid Level {target_level} Price Calculation:")
+                    logger.info(f"   - grid_start_price: {grid_start_price:.5f}")
+                    logger.info(f"   - grid_interval_pips: {grid_interval_pips}")
+                    logger.info(f"   - pip_value: {pip_value:.5f}")
+                    logger.info(f"   - target_level: {target_level}")
+                    logger.info(f"   - calculated target_price: {target_price:.5f}")
                     
                     # Enhanced retry logic for SELL orders
                     success = False
@@ -3843,22 +3955,25 @@ class MoveGuard(Strategy):
                             if not success and retry_count < max_retries:
                                 # Get fresh bid price for retry
                                 bid = self.meta_trader.get_bid(self.symbol)
-                                target_price = bid - (grid_interval_pips * (target_level+1) * pip_value)
+                                target_price = bid - (grid_interval_pips * (target_level - 1) * pip_value)
+                                grid_start_price = bid 
                                 logger.warning(f"⚠️ SELL level {target_level} failed, retrying with bid price {bid:.5f}, new target {target_price:.5f}")
                                 success = self._place_pending_grid_order(cycle, target_level, target_price, 'SELL', bid)
 
                         else:
                             # Target price is not below current price, use bid price
                             bid = self.meta_trader.get_bid(self.symbol)
-                            target_price = bid - (grid_interval_pips * (target_level+1) * pip_value)
+                            target_price = bid - (grid_interval_pips * (target_level - 1) * pip_value)
+                            grid_start_price = bid 
                             logger.info(f"🔄 SELL level {target_level} price too high, using bid price {bid:.5f}, target {target_price:.5f} (attempt {retry_count}/{max_retries})")
                             success = self._place_pending_grid_order(cycle, target_level, target_price, 'SELL', bid)
                     
                     if not success:
                         logger.error(f"❌ Failed to place SELL level {target_level} after {max_retries} attempts - stopping grid placement")
+                        # Remove the level from pending_order_levels since order placement failed
+                        cycle.pending_order_levels.discard(target_level)
                         # cancel all pending orders
-                        self._cancel_pending_grid_orders(cycle)
-                        break  # Stop placing more orders if this one fails
+                        self._cancel_cycle_pending_orders(cycle)
                     else:
                         logger.info(f"✅ Successfully placed SELL level {target_level} at price {target_price:.5f}")
                     
