@@ -1404,8 +1404,8 @@ class MoveGuard(Strategy):
                 },
                 'zone_data': {
                     'base_price': float(order_data.get('price', 0.0)),
-                    'upper_boundary': float(order_data.get('price', 0.0)) + (cycle_config.get('zone_threshold_pips', 50.0) * self._get_pip_value() / 2),
-                    'lower_boundary': float(order_data.get('price', 0.0)) - (cycle_config.get('zone_threshold_pips', 50.0) * self._get_pip_value() / 2),
+                    'upper_boundary': float(order_data.get('price', 0.0)) + (cycle_config.get('zone_threshold_pips', 50.0) * self._get_pip_value() ),
+                    'lower_boundary': float(order_data.get('price', 0.0)) - (cycle_config.get('zone_threshold_pips', 50.0) * self._get_pip_value() ),
                     'movement_mode':  self.zone_movement_mode,
                     'last_movement': None
                 },
@@ -1880,8 +1880,8 @@ class MoveGuard(Strategy):
                         
                         # Enhanced direction determination for pending orders scenario
                         new_direction = self._determine_new_direction_after_all_orders_closed(cycle, current_price)
-                        if len(cycle.pending_orders) <5:
-                            self._cancel_cycle_pending_orders(cycle)
+                        # if len(cycle.pending_orders) <5:
+                        #     self._cancel_cycle_pending_orders(cycle)
                         if new_direction:
                             # Set cycle direction
                             cycle.direction = new_direction
@@ -1942,7 +1942,7 @@ class MoveGuard(Strategy):
                     if hasattr(cycle, 'trailing_stop_loss') and cycle.trailing_stop_loss is not None:
                         # Only update SL for active positions, not pending orders
                         active_positions = [o for o in getattr(cycle, 'orders', []) if o.get('status') == 'active']
-                        if active_positions:
+                        if len(active_positions) > 1:
                             logger.info(f"🔄 Updating trailing SL for {len(active_positions)} active positions to {cycle.trailing_stop_loss:.5f}")
                             success = self._update_all_orders_trailing_sl(cycle, cycle.trailing_stop_loss)
                             
@@ -3024,7 +3024,7 @@ class MoveGuard(Strategy):
                     zone_threshold_pips = 50.0
                 
                 # Calculate boundaries with validation
-                zone_threshold = zone_threshold_pips * pip_value / 2
+                zone_threshold = zone_threshold_pips * pip_value 
                 upper_boundary = base + zone_threshold
                 lower_boundary = base - zone_threshold
                 
@@ -3419,21 +3419,20 @@ class MoveGuard(Strategy):
                 order_sl = cycle.trailing_stop_loss
                 logger.debug(f"📊 Using existing trailing SL for BUY grid order: {order_sl:.5f}")
             else:
-                # Calculate initial trailing SL based on highest buy price or current price
-                zone_threshold_pips = self.get_cycle_zone_threshold_pips(cycle)
+                # Calculate SL based on initial_stop_loss_pips from configuration
                 upper_boundary = cycle.zone_data.get('upper_boundary', 0.0)
                 
                 if hasattr(cycle, 'highest_buy_price') and cycle.highest_buy_price > 0:
-                    order_sl = cycle.highest_buy_price - (zone_threshold_pips * pip_value)
+                    order_sl = cycle.highest_buy_price - (initial_stop_loss_pips * pip_value)
                 else:
-                    # First order - use order price as reference
-                    order_sl = order_price - (zone_threshold_pips * pip_value)
+                    # First order - use order price as reference with initial_stop_loss_pips
+                    order_sl = order_price - (initial_stop_loss_pips * pip_value)
                 
                 # Cap at upper boundary if zone movement mode requires it
                 if cycle.zone_movement_mode == 'Move Both Sides' or cycle.zone_movement_mode == 'Move Up Only':
                     order_sl = max(order_sl, upper_boundary)
                 
-                logger.debug(f"📊 Calculated initial trailing SL for BUY grid order: {order_sl:.5f}")
+                logger.debug(f"📊 Calculated initial SL for BUY grid order using initial_stop_loss_pips ({initial_stop_loss_pips}): {order_sl:.5f}")
             
             # Validate stop loss is reasonable (at least 1 pip away from order price)
             min_sl_distance = pip_value * 1.0  # 1 pip minimum
@@ -3585,21 +3584,20 @@ class MoveGuard(Strategy):
                 order_sl = cycle.trailing_stop_loss
                 logger.debug(f"📊 Using existing trailing SL for SELL grid order: {order_sl:.5f}")
             else:
-                # Calculate initial trailing SL based on lowest sell price or current price
-                zone_threshold_pips = self.get_cycle_zone_threshold_pips(cycle)
+                # Calculate SL based on initial_stop_loss_pips from configuration
                 lower_boundary = cycle.zone_data.get('lower_boundary', 0.0)
                 
                 if hasattr(cycle, 'lowest_sell_price') and cycle.lowest_sell_price < 999999.0:
-                    order_sl = cycle.lowest_sell_price + (zone_threshold_pips * pip_value)
+                    order_sl = cycle.lowest_sell_price + (initial_stop_loss_pips * pip_value)
                 else:
-                    # First order - use order price as reference
-                    order_sl = order_price + (zone_threshold_pips * pip_value)
+                    # First order - use order price as reference with initial_stop_loss_pips
+                    order_sl = order_price + (initial_stop_loss_pips * pip_value)
                 
                 # Cap at lower boundary if zone movement mode requires it
                 if cycle.zone_movement_mode == 'Move Both Sides' or cycle.zone_movement_mode == 'Move Down Only':
                     order_sl = min(order_sl, lower_boundary)
                 
-                logger.debug(f"📊 Calculated initial trailing SL for SELL grid order: {order_sl:.5f}")
+                logger.debug(f"📊 Calculated initial SL for SELL grid order using initial_stop_loss_pips ({initial_stop_loss_pips}): {order_sl:.5f}")
             
             # Validate stop loss is reasonable (at least 1 pip away from order price)
             min_sl_distance = pip_value * 1.0  # 1 pip minimum
@@ -3898,7 +3896,7 @@ class MoveGuard(Strategy):
                         # Remove the level from pending_order_levels since order placement failed
                         cycle.pending_order_levels.discard(target_level)
                         # cancel all pending orders
-                        self._cancel_cycle_pending_orders(cycle)
+                        # self._cancel_cycle_pending_orders(cycle)
                     else:
                         logger.info(f"✅ Successfully placed BUY level {target_level} at price {target_price:.5f}")
             elif cycle.direction == 'SELL':
@@ -3973,7 +3971,7 @@ class MoveGuard(Strategy):
                         # Remove the level from pending_order_levels since order placement failed
                         cycle.pending_order_levels.discard(target_level)
                         # cancel all pending orders
-                        self._cancel_cycle_pending_orders(cycle)
+                        # self._cancel_cycle_pending_orders(cycle)
                     else:
                         logger.info(f"✅ Successfully placed SELL level {target_level} at price {target_price:.5f}")
                     
@@ -3989,6 +3987,7 @@ class MoveGuard(Strategy):
             logger.info(f"📋 MoveGuard placing pending {direction} order at level {grid_level}, price {target_price:.5f}")
             
             # Get cycle-specific configuration values
+            initial_stop_loss_pips = self.get_cycle_config_value(cycle, 'initial_stop_loss_pips', self.initial_stop_loss_pips)
             lot_size = self.get_cycle_config_value(cycle, 'lot_size', self.lot_size)
             max_trades_per_cycle = self.get_cycle_config_value(cycle, 'max_trades_per_cycle', self.max_trades_per_cycle)
             
@@ -3998,7 +3997,7 @@ class MoveGuard(Strategy):
                 logger.info(f"⚠️ Cycle {cycle.cycle_id} has reached max total trades ({max_trades_per_cycle}) - cannot place pending order")
                 return False
             
-            # Calculate SL for pending order (use current trailing SL or calculate proper price)
+            # Calculate SL for pending order (use current trailing SL or calculate using initial_stop_loss_pips)
             pip_value = self._get_pip_value()
             order_sl = 0
             
@@ -4006,20 +4005,20 @@ class MoveGuard(Strategy):
                 # Use existing trailing SL if it's a valid price (not pips)
                 if cycle.trailing_stop_loss > 1000:  # Valid price range for BTCUSDm
                     order_sl = cycle.trailing_stop_loss
+                    logger.debug(f"📊 Using existing trailing SL for pending {direction} grid order: {order_sl:.5f}")
                 else:
-                    logger.warning(f"Trailing SL {cycle.trailing_stop_loss} appears to be in pips, calculating proper price")
-                    zone_threshold_pips = self.get_cycle_zone_threshold_pips(cycle)
+                    logger.warning(f"Trailing SL {cycle.trailing_stop_loss} appears to be in pips, calculating proper price using initial_stop_loss_pips")
                     if direction == 'BUY':
-                        order_sl = target_price - (zone_threshold_pips * pip_value)
+                        order_sl = target_price - (initial_stop_loss_pips * pip_value)
                     else:  # SELL
-                        order_sl = target_price + (zone_threshold_pips * pip_value)
+                        order_sl = target_price + (initial_stop_loss_pips * pip_value)
             else:
-                # Calculate initial SL
-                zone_threshold_pips = self.get_cycle_zone_threshold_pips(cycle)
+                # Calculate initial SL using initial_stop_loss_pips
                 if direction == 'BUY':
-                    order_sl = target_price - (zone_threshold_pips * pip_value)
+                    order_sl = target_price - (initial_stop_loss_pips * pip_value)
                 else:  # SELL
-                    order_sl = target_price + (zone_threshold_pips * pip_value)
+                    order_sl = target_price + (initial_stop_loss_pips * pip_value)
+                logger.debug(f"📊 Calculated initial SL for pending {direction} grid order using initial_stop_loss_pips ({initial_stop_loss_pips}): {order_sl:.5f}")
             
             # CRITICAL: Validate SL distance from order price to prevent MT5 errors
             if order_sl > 0:
@@ -5072,8 +5071,8 @@ class MoveGuard(Strategy):
             
             # Initialize variables with current values as defaults
             new_base = cycle.zone_data.get('base_price', base_price)
-            new_upper = cycle.zone_data.get('upper_boundary', base_price + (zone_threshold_pips * pip_value / 2))
-            new_lower = cycle.zone_data.get('lower_boundary', base_price - (zone_threshold_pips * pip_value / 2))
+            new_upper = cycle.zone_data.get('upper_boundary', base_price + (zone_threshold_pips * pip_value ))
+            new_lower = cycle.zone_data.get('lower_boundary', base_price - (zone_threshold_pips * pip_value ))
             
             if movement_mode == 'No Move':
                 # Keep original boundaries
@@ -5082,26 +5081,26 @@ class MoveGuard(Strategy):
             elif movement_mode == 'Move Up Only' and new_direction == 'BUY' and base_price > current_price:
                 # Move zone up to base price
                 new_base = base_price
-                new_upper = new_base + (zone_threshold_pips * pip_value / 2)
-                new_lower = new_base - (zone_threshold_pips * pip_value / 2)
+                new_upper = new_base + (zone_threshold_pips * pip_value  )
+                new_lower = new_base
                 logger.info(f"🎯 Move Up Only: Moving zone up to {base_price:.5f}")
             elif movement_mode == 'Move Down Only' and new_direction == 'SELL' and base_price < current_price:
                 # Move zone down to base price
                 new_base = base_price
-                new_upper = new_base + (zone_threshold_pips * pip_value / 2)
-                new_lower = new_base - (zone_threshold_pips * pip_value / 2)
+                new_upper = new_base 
+                new_lower = new_base - (zone_threshold_pips * pip_value )
                 logger.info(f"🎯 Move Down Only: Moving zone down to {base_price:.5f}")
             elif movement_mode == 'Move Both Sides' and new_direction == 'BUY' and base_price > current_price:
                 # Move zone to base price for BUY
                 new_base = base_price
-                new_upper = new_base + (zone_threshold_pips * pip_value / 2)
-                new_lower = new_base - (zone_threshold_pips * pip_value / 2)
+                new_upper = new_base + (zone_threshold_pips * pip_value )
+                new_lower = new_base 
                 logger.info(f"🎯 Move Both Sides: Moving zone to {base_price:.5f} for BUY")
             elif movement_mode == 'Move Both Sides' and new_direction == 'SELL' and base_price < current_price:
                 # Move zone to base price for SELL
                 new_base = base_price
-                new_upper = new_base + (zone_threshold_pips * pip_value / 2)
-                new_lower = new_base - (zone_threshold_pips * pip_value / 2)
+                new_upper = new_base 
+                new_lower = new_base - (zone_threshold_pips * pip_value )
                 logger.info(f"🎯 Move Both Sides: Moving zone to {base_price:.5f} for SELL")
             else:
                 # No bounds update needed - use current values
@@ -5142,8 +5141,8 @@ class MoveGuard(Strategy):
             if not hasattr(cycle, 'zone_data') or not cycle.zone_data:
                 cycle.zone_data = {
                     'base_price': cycle.entry_price,
-                    'upper_boundary': cycle.entry_price + (self.get_cycle_zone_threshold_pips(cycle) * self._get_pip_value() / 2),
-                    'lower_boundary': cycle.entry_price - (self.get_cycle_zone_threshold_pips(cycle) * self._get_pip_value() / 2),
+                    'upper_boundary': cycle.entry_price + (self.get_cycle_zone_threshold_pips(cycle) * self._get_pip_value()),
+                    'lower_boundary': cycle.entry_price - (self.get_cycle_zone_threshold_pips(cycle) * self._get_pip_value() ),
                     'movement_mode': self.zone_movement_mode,
                     'last_movement': None
                 }
