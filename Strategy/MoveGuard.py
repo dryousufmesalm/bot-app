@@ -1934,7 +1934,39 @@ class MoveGuard(Strategy):
                         cycle.grid_restart_completed = False
                         logger.info(f"🔄 MoveGuard GRID RESTART: Reset restart completion flag - orders are active again in cycle {cycle.cycle_id}")
                     
+                    if len(cycle.pending_orders) > 0:
+                        # Validate pending orders grid levels - cancel if invalid
+                        if not self._validate_pending_orders_grid_levels(cycle):
+                            logger.warning(f"🚨 Invalid pending orders grid levels detected - cancelling all pending orders")
+                            self._cancel_cycle_pending_orders(cycle)
+                            continue
+                        
+                        # Enhanced direction determination for pending orders scenario
+                        new_direction = self._determine_new_direction_after_all_orders_closed(cycle, current_price)
+                        # if len(cycle.pending_orders) <5:
+                        #     self._cancel_cycle_pending_orders(cycle)
+                        if new_direction:
+                            # Set cycle direction
+                            cycle.direction = new_direction
                     
+                            if new_direction == 'BUY':
+                                cycle.was_above_upper = True
+                                # Cancel SELL pending orders if any
+                                active_sell_pending_orders = [o for o in cycle.pending_orders if o.get('direction') == 'SELL']
+                                active_buy_pending_orders = [o for o in cycle.pending_orders if o.get('direction') == 'BUY']
+                                if len(active_buy_pending_orders) > 0 and cycle.trailing_stop_loss is not None and current_price < cycle.trailing_stop_loss and cycle.trailing_stop_loss > 0: 
+                                    self._cancel_buy_pending_orders(cycle)
+                                if len(active_sell_pending_orders) > 0:
+                                    self._cancel_sell_pending_orders(cycle)
+                            else:  # SELL
+                                cycle.was_below_lower = True
+                                # Cancel BUY pending orders if any
+                                active_buy_pending_orders = [o for o in cycle.pending_orders if o.get('direction') == 'BUY']
+                                active_sell_pending_orders = [o for o in cycle.pending_orders if o.get('direction') == 'SELL']
+                                if len(active_buy_pending_orders) > 0:
+                                    self._cancel_buy_pending_orders(cycle)
+                                if len(active_sell_pending_orders) > 0 and cycle.trailing_stop_loss is not None and current_price > cycle.trailing_stop_loss and cycle.trailing_stop_loss > 0:
+                                    self._cancel_sell_pending_orders(cycle)
                     # Maintain pending orders ahead of current position
                     self._maintain_pending_grid_orders(cycle, current_price, 5)
                     
@@ -5015,36 +5047,36 @@ class MoveGuard(Strategy):
             # Determine direction based on movement mode and price position
             if movement_mode == 'No Move':
                 # No movement - use original boundaries
-                if current_price >= (upper + initial_offset):
+                if current_price >= (upper ):
                     logger.info(f"🎯 No Move mode: Price above upper boundary, direction=BUY")
                     return 'BUY'
-                elif current_price <= (lower - initial_offset):
+                elif current_price <= (lower):
                     logger.info(f"🎯 No Move mode: Price below lower boundary, direction=SELL")
                     return 'SELL'
             elif movement_mode == 'Move Up Only':
                 # Only move up - prefer BUY direction
-                if current_price >= (upper + initial_offset):
+                if current_price >= (upper ):
                     logger.info(f"🎯 Move Up Only mode: Price above upper boundary, direction=BUY")
                     return 'BUY'
                 # Only allow SELL if price is significantly below lower boundary
-                elif current_price <= (lower - initial_offset ):
+                elif current_price <= (lower ):
                     logger.info(f"🎯 Move Up Only mode: Price significantly below lower boundary, direction=SELL")
                     return 'SELL'
             elif movement_mode == 'Move Down Only':
                 # Only move down - prefer SELL direction
-                if current_price <= (lower - initial_offset):
+                if current_price <= (lower ):
                     logger.info(f"🎯 Move Down Only mode: Price below lower boundary, direction=SELL")
                     return 'SELL'
                 # Only allow BUY if price is significantly above upper boundary
-                elif current_price >= (upper + initial_offset ):
+                elif current_price >= (upper ):
                     logger.info(f"🎯 Move Down Only mode: Price significantly above upper boundary, direction=BUY")
                     return 'BUY'
             else:  # Move Both Sides
                 # Standard logic for both directions
-                if current_price >= (upper + initial_offset):
+                if current_price >= (upper ):
                     logger.info(f"🎯 Move Both Sides mode: Price above upper boundary, direction=BUY")
                     return 'BUY'
-                elif current_price <= (lower - initial_offset):
+                elif current_price <= (lower ):
                     logger.info(f"🎯 Move Both Sides mode: Price below lower boundary, direction=SELL")
                     return 'SELL'
             
