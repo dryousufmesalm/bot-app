@@ -1913,9 +1913,7 @@ class MoveGuard(Strategy):
                         cycle.pending_orders = []
                         cycle.pending_order_levels = set()
                         logger.info(f"🔄 MoveGuard: Initialized pending order tracking for cycle {cycle.cycle_id}")
-                    
-                    
-            
+                
                     # Use cycle-specific zone_threshold_pips from cycle_config
                     if total_order_count == 0:
                         cycle_zone_threshold_pips = cycle.cycle_config.get('zone_threshold_pips', 50.0) if hasattr(cycle, 'cycle_config') and cycle.cycle_config else 50.0
@@ -1954,8 +1952,7 @@ class MoveGuard(Strategy):
                                 # Cancel SELL pending orders if any
                                 active_sell_pending_orders = [o for o in cycle.pending_orders if o.get('direction') == 'SELL']
                                 active_buy_pending_orders = [o for o in cycle.pending_orders if o.get('direction') == 'BUY']
-                                if len(active_buy_pending_orders) > 0 and cycle.trailing_stop_loss is not None and current_price < cycle.trailing_stop_loss and cycle.trailing_stop_loss > 0: 
-                                    self._cancel_buy_pending_orders(cycle)
+                  
                                 if len(active_sell_pending_orders) > 0:
                                     self._cancel_sell_pending_orders(cycle)
                             else:  # SELL
@@ -1965,17 +1962,16 @@ class MoveGuard(Strategy):
                                 active_sell_pending_orders = [o for o in cycle.pending_orders if o.get('direction') == 'SELL']
                                 if len(active_buy_pending_orders) > 0:
                                     self._cancel_buy_pending_orders(cycle)
-                                if len(active_sell_pending_orders) > 0 and cycle.trailing_stop_loss is not None and current_price > cycle.trailing_stop_loss and cycle.trailing_stop_loss > 0:
-                                    self._cancel_sell_pending_orders(cycle)
+                          
                     # Maintain pending orders ahead of current position
                     self._maintain_pending_grid_orders(cycle, current_price, 5)
                     
-                    # Update trailing stop loss for active positions only
-                    if hasattr(cycle, 'trailing_stop_loss') and cycle.trailing_stop_loss is not None:
-                        # Only update SL for active positions, not pending orders
+                    # Update trailing stop loss for ALL active positions
+                    if hasattr(cycle, 'trailing_stop_loss') and cycle.trailing_stop_loss is not None and cycle.trailing_stop_loss > 0:
+                        # Update SL for all active positions, not pending orders
                         active_positions = [o for o in getattr(cycle, 'orders', []) if o.get('status') == 'active']
-                        if len(active_positions) > 1:
-                            logger.info(f"🔄 Updating trailing SL for {len(active_positions)} active positions to {cycle.trailing_stop_loss:.5f}")
+                        if len(active_positions) > 0:
+                            logger.info(f"🔄 Updating trailing SL for {len(active_positions)} active position(s) to {cycle.trailing_stop_loss:.5f}")
                             success = self._update_all_orders_trailing_sl(cycle, cycle.trailing_stop_loss)
                             
                     continue
@@ -3765,22 +3761,63 @@ class MoveGuard(Strategy):
         return max(0, target_pending_count - current_pending_count)
 
     def _get_next_grid_level(self, cycle) -> int:
-        """Get the next grid level to place based on existing levels - starts from grid level 1"""
-        # Find highest existing level
-        max_level = 0  # Start from 0 instead of -1 since we want to start from grid level 1
+        """Get the next grid level to place - continues from highest active order level only (pending orders are excluded)
         
-        # Check pending orders
-        for level in cycle.pending_order_levels:
-            max_level = max(max_level, level)
+        If active orders are 1, 2, 3, next level should be 4.
+        If no active orders, starts from 1.
+        """
+        # Find highest active order level (NOT pending orders)
+        max_active_level = 0
+        active_levels = []
         
-        # Check active orders
+        # Only check active orders (pending orders are ignored as they'll be replaced)
         for order in cycle.orders:
             if order.get('status') == 'active':
                 grid_level = order.get('grid_level', 0)
-                max_level = max(max_level, grid_level)
+                if grid_level > 0:  # Only count valid grid levels (> 0)
+                    max_active_level = max(max_active_level, grid_level)
+                    active_levels.append(grid_level)
         
-        # Return next level, ensuring we start from grid level 1
-        return max(max_level + 1, 1)
+        # Return next level after highest active order, ensuring we start from grid level 1
+        next_level = max_active_level + 1
+        result = max(next_level, 1)
+        
+        logger.debug(f"🔍 _get_next_grid_level: active_levels={sorted(active_levels)}, max_active={max_active_level}, next_level={result}")
+        return result
+    
+    def _check_grid_level_gaps(self, cycle) -> bool:
+        """Check if there are gaps in active grid order levels
+        
+        Returns True if gaps are detected (e.g., levels 1, 3, 5 instead of 1, 2, 3)
+        Returns False if levels are sequential (1, 2, 3) or no active orders
+        """
+        try:
+            # Get all active order grid levels
+            active_levels = []
+            for order in cycle.orders:
+                if order.get('status') == 'active':
+                    grid_level = order.get('grid_level', 0)
+                    if grid_level > 0:  # Only count valid grid levels
+                        active_levels.append(grid_level)
+            
+            # If no active orders or only 1, no gaps possible
+            if len(active_levels) <= 1:
+                return False
+            
+            # Sort levels
+            active_levels.sort()
+            
+            # Check for gaps: levels should be consecutive (1, 2, 3...)
+            for i in range(len(active_levels) - 1):
+                if active_levels[i + 1] != active_levels[i] + 1:
+                    logger.warning(f"⚠️ Gap detected in grid levels: {active_levels} - missing levels between {active_levels[i]} and {active_levels[i + 1]}")
+                    return True
+            
+            return False
+            
+        except Exception as e:
+            logger.error(f"❌ Error checking grid level gaps: {str(e)}")
+            return False
 
     def _validate_pending_orders_grid_levels(self, cycle) -> bool:
         """Validate that pending orders start from grid levels 1 to 5 when no active orders exist"""
@@ -3833,11 +3870,27 @@ class MoveGuard(Strategy):
             # Sync pending orders from PocketBase to ensure we have latest data
             self._sync_pending_orders_from_pocketbase(cycle)
             
+            # CRITICAL: Check for gaps in active grid levels - if gaps exist, cancel all pending and replace
+            if self._check_grid_level_gaps(cycle):
+                logger.warning(f"🚨 Gap detected in active grid levels - cancelling all pending orders and will replace")
+                self._cancel_cycle_pending_orders(cycle)
+                # Continue to place new pending orders below
+            
+            # CRITICAL: Cancel pending orders that don't match cycle direction
+            if hasattr(cycle, 'direction') and cycle.direction in ['BUY', 'SELL']:
+                mismatched_pending = [o for o in cycle.pending_orders if o.get('direction') != cycle.direction]
+                if len(mismatched_pending) > 0:
+                    logger.warning(f"🚨 Found {len(mismatched_pending)} pending orders with wrong direction (cycle: {cycle.direction}) - cancelling them")
+                    if cycle.direction == 'BUY':
+                        self._cancel_sell_pending_orders(cycle)
+                    else:
+                        self._cancel_buy_pending_orders(cycle)
+            
             # Validate pending orders grid levels before proceeding
             if not self._validate_pending_orders_grid_levels(cycle):
                 logger.warning(f"🚨 Invalid pending orders grid levels detected in grid maintenance - cancelling all pending orders")
                 self._cancel_cycle_pending_orders(cycle)
-                return False
+                # Continue to place new pending orders below
             
             # Calculate how many pending orders we need to maintain exactly 5
             pending_orders_needed = self._calculate_pending_orders_needed(cycle)
@@ -3845,19 +3898,44 @@ class MoveGuard(Strategy):
             if pending_orders_needed <= 0:
                 logger.debug(f"📊 Grid maintenance: Already have sufficient pending orders ({len(cycle.pending_orders)}/5)")
                 return True
-            
             logger.info(f"📋 AUTOMATIC GRID MAINTENANCE: Need to place {pending_orders_needed} more pending orders to maintain 5 pending orders (current: {len(cycle.pending_orders)})")
-            
             # Get grid parameters
             pip_value = self._get_pip_value()
             grid_interval_pips = self.get_cycle_config_value(cycle, 'grid_interval_pips', self.grid_interval_pips)
             entry_interval_pips = self.get_cycle_entry_interval_pips(cycle)
             
+            # CRITICAL: Ensure cycle has a valid direction before placing orders
+            if not hasattr(cycle, 'direction') or cycle.direction not in ['BUY', 'SELL']:
+                logger.error(f"❌ Cycle {cycle.cycle_id} has invalid direction: {getattr(cycle, 'direction', None)} - cannot place pending orders")
+                return False
             # Calculate grid start price
             upper = cycle.zone_data.get('upper_boundary', 0.0)
             lower = cycle.zone_data.get('lower_boundary', 0.0)
             
-            if cycle.direction == 'BUY':
+            # CRITICAL: Fix direction BEFORE placing orders to ensure all orders use same direction
+            # Cancel pending orders with wrong direction before placing new ones
+            if len(cycle.pending_orders) > 0:
+                # Validate pending orders grid levels - cancel if invalid
+                if not self._validate_pending_orders_grid_levels(cycle):
+                    logger.warning(f"🚨 Invalid pending orders grid levels detected - cancelling all pending orders")
+                    self._cancel_cycle_pending_orders(cycle)
+                else:
+                    # Check if pending orders match current cycle direction
+                    mismatched_pending = [o for o in cycle.pending_orders if o.get('direction') != cycle.direction]
+                    if len(mismatched_pending) > 0:
+                        logger.warning(f"🚨 Found {len(mismatched_pending)} pending orders with wrong direction (cycle: {cycle.direction}) - cancelling them")
+                        if cycle.direction == 'BUY':
+                            self._cancel_sell_pending_orders(cycle)
+                        else:
+                            self._cancel_buy_pending_orders(cycle)
+            
+            # CRITICAL: Use current cycle direction for ALL pending orders (don't change it mid-placement)
+            # Store direction to ensure consistency throughout this function
+            order_direction = cycle.direction
+            
+            logger.info(f"📋 Placing {pending_orders_needed} pending {order_direction} orders - cycle direction: {order_direction}")
+            
+            if order_direction == 'BUY':
                 # Check if this is a grid restart scenario
                 grid_restart_completed = getattr(cycle, 'grid_restart_completed', False)
                 is_grid_restart = (hasattr(cycle, 'grid_restart_start_price') and 
@@ -3870,18 +3948,26 @@ class MoveGuard(Strategy):
                     grid_start_price = upper + (entry_interval_pips * pip_value)
                 
                 # Place pending orders one by one, checking for existing levels
-                for _ in range(pending_orders_needed):
-                    next_level = self._get_next_grid_level(cycle)
+                # Get starting level from highest active order
+                start_level = self._get_next_grid_level(cycle)
+                
+                for order_index in range(pending_orders_needed):
+                    # Calculate next level: start from highest active + order_index
+                    target_level = start_level + order_index
                     
-                    # Check if this level already exists
-                    if self._level_already_exists(cycle, next_level):
-                        logger.debug(f"📊 Level {next_level} already exists, skipping")
-                        continue
+                    # Check if this level already exists (in active or pending)
+                    if self._level_already_exists(cycle, target_level):
+                        logger.debug(f"📊 Level {target_level} already exists, skipping")
+                        # If level exists, try next level
+                        target_level = start_level + order_index + 1
+                        # Check again
+                        if self._level_already_exists(cycle, target_level):
+                            logger.warning(f"⚠️ Level {target_level} also exists, continuing to next")
+                            continue
                     
-                    target_level = next_level
+                    logger.info(f"📋 Placing {order_direction} pending order #{order_index + 1}/{pending_orders_needed} at grid level {target_level} (start_level={start_level})")
                     
-                    # Immediately add this level to pending_order_levels to prevent duplicates in the same batch
-                    cycle.pending_order_levels.add(target_level)
+                    # Note: Level will be added to pending_order_levels inside _place_pending_grid_order
                     
                     # Calculate target price for this level
                     # For BUY orders: grid level 1 should be at grid_start_price, level 2 should be grid_start_price + grid_interval_pips
@@ -3906,7 +3992,7 @@ class MoveGuard(Strategy):
                         # Only place if target price is above current price (for BUY orders)
                         if target_price > current_price:
                             logger.info(f"🔄 Attempting to place BUY level {target_level} at price {target_price:.5f} (attempt {retry_count}/{max_retries})")
-                            success = self._place_pending_grid_order(cycle, target_level, target_price, 'BUY', current_price)
+                            success = self._place_pending_grid_order(cycle, target_level, target_price, order_direction, current_price)
                             
                             if not success and retry_count < max_retries:
                                 # Get fresh ask price for retry
@@ -3914,24 +4000,23 @@ class MoveGuard(Strategy):
                                 target_price = ask + (grid_interval_pips * (target_level - 1) * pip_value)
                                 grid_start_price = ask
                                 logger.warning(f"⚠️ BUY level {target_level} failed, retrying with ask price {ask:.5f}, new target {target_price:.5f}")
-                                success = self._place_pending_grid_order(cycle, target_level, target_price, 'BUY', ask)
+                                success = self._place_pending_grid_order(cycle, target_level, target_price, order_direction, ask)
                         else:
                             # Target price is not above current price, use ask price
                             ask = self.meta_trader.get_ask(self.symbol)
                             target_price = ask + (grid_interval_pips * (target_level - 1) * pip_value)
                             grid_start_price = ask 
                             logger.info(f"🔄 BUY level {target_level} price too low, using ask price {ask:.5f}, target {target_price:.5f} (attempt {retry_count}/{max_retries})")
-                            success = self._place_pending_grid_order(cycle, target_level, target_price, 'BUY', ask)
+                            success = self._place_pending_grid_order(cycle, target_level, target_price, order_direction, ask)
                     
                     if not success:
-                        logger.error(f"❌ Failed to place BUY level {target_level} after {max_retries} attempts - stopping grid placement")
-                        # Remove the level from pending_order_levels since order placement failed
-                        cycle.pending_order_levels.discard(target_level)
+                        logger.error(f"❌ Failed to place {order_direction} level {target_level} after {max_retries} attempts - stopping grid placement")
+                        # Note: Level removal handled in _place_pending_grid_order on failure
                         # cancel all pending orders
                         # self._cancel_cycle_pending_orders(cycle)
                     else:
-                        logger.info(f"✅ Successfully placed BUY level {target_level} at price {target_price:.5f}")
-            elif cycle.direction == 'SELL':
+                        logger.info(f"✅ Successfully placed {order_direction} level {target_level} at price {target_price:.5f}")
+            elif order_direction == 'SELL':
                 # Check if this is a grid restart scenario
                 grid_restart_completed = getattr(cycle, 'grid_restart_completed', False)
                 is_grid_restart = (hasattr(cycle, 'grid_restart_start_price') and 
@@ -3944,18 +4029,26 @@ class MoveGuard(Strategy):
                     grid_start_price = lower - (entry_interval_pips * pip_value)
                 
                 # Place pending orders one by one, checking for existing levels
-                for _ in range(pending_orders_needed):
-                    next_level = self._get_next_grid_level(cycle)
+                # Get starting level from highest active order
+                start_level = self._get_next_grid_level(cycle)
+                
+                for order_index in range(pending_orders_needed):
+                    # Calculate next level: start from highest active + order_index
+                    target_level = start_level + order_index
                     
-                    # Check if this level already exists
-                    if self._level_already_exists(cycle, next_level):
-                        logger.debug(f"📊 Level {next_level} already exists, skipping")
-                        continue
+                    # Check if this level already exists (in active or pending)
+                    if self._level_already_exists(cycle, target_level):
+                        logger.debug(f"📊 Level {target_level} already exists, skipping")
+                        # If level exists, try next level
+                        target_level = start_level + order_index + 1
+                        # Check again
+                        if self._level_already_exists(cycle, target_level):
+                            logger.warning(f"⚠️ Level {target_level} also exists, continuing to next")
+                            continue
                     
-                    target_level = next_level
+                    logger.info(f"📋 Placing {order_direction} pending order #{order_index + 1}/{pending_orders_needed} at grid level {target_level}")
                     
-                    # Immediately add this level to pending_order_levels to prevent duplicates in the same batch
-                    cycle.pending_order_levels.add(target_level)
+                    # Note: Level will be added to pending_order_levels inside _place_pending_grid_order
                     
                     # Calculate target price for this level
                     # For SELL orders: grid level 1 should be at grid_start_price, level 2 should be grid_start_price - grid_interval_pips
@@ -3980,7 +4073,7 @@ class MoveGuard(Strategy):
                         # Only place if target price is below current price (for SELL orders)
                         if target_price < current_price:
                             logger.info(f"🔄 Attempting to place SELL level {target_level} at price {target_price:.5f} (attempt {retry_count}/{max_retries})")
-                            success = self._place_pending_grid_order(cycle, target_level, target_price, 'SELL', current_price)
+                            success = self._place_pending_grid_order(cycle, target_level, target_price, order_direction, current_price)
                             
                             if not success and retry_count < max_retries:
                                 # Get fresh bid price for retry
@@ -3988,7 +4081,7 @@ class MoveGuard(Strategy):
                                 target_price = bid - (grid_interval_pips * (target_level - 1) * pip_value)
                                 grid_start_price = bid 
                                 logger.warning(f"⚠️ SELL level {target_level} failed, retrying with bid price {bid:.5f}, new target {target_price:.5f}")
-                                success = self._place_pending_grid_order(cycle, target_level, target_price, 'SELL', bid)
+                                success = self._place_pending_grid_order(cycle, target_level, target_price, order_direction, bid)
 
                         else:
                             # Target price is not below current price, use bid price
@@ -3996,16 +4089,15 @@ class MoveGuard(Strategy):
                             target_price = bid - (grid_interval_pips * (target_level - 1) * pip_value)
                             grid_start_price = bid 
                             logger.info(f"🔄 SELL level {target_level} price too high, using bid price {bid:.5f}, target {target_price:.5f} (attempt {retry_count}/{max_retries})")
-                            success = self._place_pending_grid_order(cycle, target_level, target_price, 'SELL', bid)
+                            success = self._place_pending_grid_order(cycle, target_level, target_price, order_direction, bid)
                     
                     if not success:
-                        logger.error(f"❌ Failed to place SELL level {target_level} after {max_retries} attempts - stopping grid placement")
-                        # Remove the level from pending_order_levels since order placement failed
-                        cycle.pending_order_levels.discard(target_level)
+                        logger.error(f"❌ Failed to place {order_direction} level {target_level} after {max_retries} attempts - stopping grid placement")
+                        # Note: Level removal handled in _place_pending_grid_order on failure
                         # cancel all pending orders
                         # self._cancel_cycle_pending_orders(cycle)
                     else:
-                        logger.info(f"✅ Successfully placed SELL level {target_level} at price {target_price:.5f}")
+                        logger.info(f"✅ Successfully placed {order_direction} level {target_level} at price {target_price:.5f}")
                     
             return True
             
@@ -4017,6 +4109,21 @@ class MoveGuard(Strategy):
         """Place a pending grid order at specified level and price"""
         try:
             logger.info(f"📋 MoveGuard placing pending {direction} order at level {grid_level}, price {target_price:.5f}")
+            
+            # CRITICAL: Ensure order direction matches cycle direction
+            if not hasattr(cycle, 'direction') or cycle.direction != direction:
+                logger.error(f"❌ Order direction {direction} does not match cycle direction {getattr(cycle, 'direction', None)} - cancelling order placement")
+                return False
+            
+            # CRITICAL: Check if this level already exists BEFORE placing order to prevent duplicates
+            if self._level_already_exists(cycle, grid_level):
+                logger.warning(f"⚠️ Grid level {grid_level} already exists - skipping duplicate order placement")
+                return False
+            
+            # CRITICAL: Add level to pending_order_levels BEFORE placing to prevent race conditions
+            if not hasattr(cycle, 'pending_order_levels'):
+                cycle.pending_order_levels = set()
+            cycle.pending_order_levels.add(grid_level)
             
             # Get cycle-specific configuration values
             initial_stop_loss_pips = self.get_cycle_config_value(cycle, 'initial_stop_loss_pips', self.initial_stop_loss_pips)
@@ -4161,7 +4268,7 @@ class MoveGuard(Strategy):
                     }
                     
                     cycle.pending_orders.append(pending_order)
-                    cycle.pending_order_levels.add(grid_level)
+                    # Note: grid_level already added to pending_order_levels at the start of this function
                     
                     # CRITICAL FIX: Add to main cycle orders list as well
                     if hasattr(cycle, 'orders'):
@@ -4179,13 +4286,22 @@ class MoveGuard(Strategy):
                     return True
                 else:
                     logger.error(f"❌ Failed to extract order ID from pending order result: {result}")
+                    # Remove level from pending_order_levels since order placement failed
+                    if hasattr(cycle, 'pending_order_levels'):
+                        cycle.pending_order_levels.discard(grid_level)
                     return False
             else:
                 logger.error(f"❌ Failed to place pending {direction} order at level {grid_level}")
+                # Remove level from pending_order_levels since order placement failed
+                if hasattr(cycle, 'pending_order_levels'):
+                    cycle.pending_order_levels.discard(grid_level)
                 return False
                 
         except Exception as e:
             logger.error(f"❌ Error placing pending grid order: {str(e)}")
+            # Remove level from pending_order_levels if there was an exception
+            if hasattr(cycle, 'pending_order_levels'):
+                cycle.pending_order_levels.discard(grid_level)
             return False
 
     def _cancel_sell_pending_orders(self, cycle) -> bool:
