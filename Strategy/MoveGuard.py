@@ -1867,7 +1867,7 @@ class MoveGuard(Strategy):
                         #     #     cycle.was_below_lower = True
                         #     #     self._place_initial_order(cycle, 'SELL', current_price)
                         #       # Maintain pending orders ahead of current position
-                        self._maintain_pending_grid_orders(cycle, current_price, 5)
+                        self._maintain_pending_grid_orders(cycle, current_price, 1)
                         # else:
                             # logger.info(f"🔄 MoveGuard: Price {current_price:.5f} is within the zone boundaries, skipping initial order placement")
                             # continue
@@ -1964,7 +1964,7 @@ class MoveGuard(Strategy):
                                     self._cancel_buy_pending_orders(cycle)
                           
                     # Maintain pending orders ahead of current position
-                    self._maintain_pending_grid_orders(cycle, current_price, 5)
+                    self._maintain_pending_grid_orders(cycle, current_price, 1)
                     
                     # Update trailing stop loss for ALL active positions
                     if hasattr(cycle, 'trailing_stop_loss') and cycle.trailing_stop_loss is not None and cycle.trailing_stop_loss > 0:
@@ -2160,14 +2160,14 @@ class MoveGuard(Strategy):
                     
                     logger.info(f"✅ MoveGuard initial {direction} order placed as pending: ID {order_id}, Price {order_price:.5f}")
                     
-                    # IMMEDIATELY place 5 pending orders to maintain grid ahead
-                    logger.info(f"🚀 AUTOMATIC GRID SETUP: Placing 5 pending orders after initial order placement")
-                    grid_success = self._maintain_pending_grid_orders(cycle, order_price, 5)
+                    # IMMEDIATELY place 1 pending order to maintain grid ahead
+                    logger.info(f"🚀 AUTOMATIC GRID SETUP: Placing 1 pending order after initial order placement")
+                    grid_success = self._maintain_pending_grid_orders(cycle, order_price, 1)
                     
                     if grid_success:
-                        logger.info(f"✅ SUCCESS: 5 pending orders placed automatically after initial order")
+                        logger.info(f"✅ SUCCESS: 1 pending order placed automatically after initial order")
                     else:
-                        logger.warning(f"⚠️ WARNING: Failed to place pending orders after initial order")
+                        logger.warning(f"⚠️ WARNING: Failed to place pending order after initial order")
                     
                     return True
                 else:
@@ -2697,7 +2697,9 @@ class MoveGuard(Strategy):
                 return False
             
             logger.debug(f"Updating SL for {len(active_orders)} active orders, skipping {len(pending_orders)} pending orders")
-            
+            if len(active_orders)<=1:
+                logger.debug(f"Only one active order found for cycle {cycle.cycle_id}, skipping SL update")
+                return False
             updated_count = 0
             failed_count = 0
             closed_orders = 0
@@ -3755,9 +3757,9 @@ class MoveGuard(Strategy):
         return False
 
     def _calculate_pending_orders_needed(self, cycle) -> int:
-        """Calculate how many pending orders are needed to maintain 5 pending orders"""
+        """Calculate how many pending orders are needed to maintain 1 pending order"""
         current_pending_count = len(cycle.pending_orders)
-        target_pending_count = 5
+        target_pending_count = 1
         return max(0, target_pending_count - current_pending_count)
 
     def _get_next_grid_level(self, cycle) -> int:
@@ -3820,7 +3822,7 @@ class MoveGuard(Strategy):
             return False
 
     def _validate_pending_orders_grid_levels(self, cycle) -> bool:
-        """Validate that pending orders start from grid levels 1 to 5 when no active orders exist"""
+        """Validate that when no active orders exist, there is at most 1 pending order and its level is 1"""
         try:
             # Check if there are no active orders
             active_orders = [o for o in cycle.orders if o.get('status') == 'active']
@@ -3842,13 +3844,17 @@ class MoveGuard(Strategy):
             # Sort the levels
             pending_levels.sort()
             
-            # Check if pending orders start from 1 to 5 (or less if fewer than 5 orders)
-            expected_levels = list(range(1, min(6, len(pending_levels) + 1)))
-            
-            # If pending levels don't match expected levels 1, 2, 3, 4, 5, validation fails
-            if pending_levels != expected_levels:
+            # Enforce at most one pending level and it must be level 1
+            if len(pending_levels) > 1:
                 logger.warning(f"⚠️ Pending orders grid levels validation failed:")
-                logger.warning(f"   - Expected levels: {expected_levels}")
+                logger.warning(f"   - Expected levels: [1] or []")
+                logger.warning(f"   - Actual levels: {pending_levels}")
+                logger.warning(f"   - No active orders found, cancelling all pending orders")
+                return False
+            
+            if pending_levels != [1]:
+                logger.warning(f"⚠️ Pending orders grid levels validation failed:")
+                logger.warning(f"   - Expected levels: [1] or []")
                 logger.warning(f"   - Actual levels: {pending_levels}")
                 logger.warning(f"   - No active orders found, cancelling all pending orders")
                 return False
@@ -3860,8 +3866,8 @@ class MoveGuard(Strategy):
             logger.error(f"❌ Error validating pending orders grid levels: {str(e)}")
             return False
 
-    def _maintain_pending_grid_orders(self, cycle, current_price: float, num_levels: int = 5) -> bool:
-        """Maintain exactly 5 pending orders ahead of current position - check for existing levels"""
+    def _maintain_pending_grid_orders(self, cycle, current_price: float, num_levels: int = 1) -> bool:
+        """Maintain exactly 1 pending order ahead of current position - check for existing levels"""
         try:
             if not hasattr(cycle, 'pending_orders'):
                 cycle.pending_orders = []
@@ -3892,13 +3898,13 @@ class MoveGuard(Strategy):
                 self._cancel_cycle_pending_orders(cycle)
                 # Continue to place new pending orders below
             
-            # Calculate how many pending orders we need to maintain exactly 5
+            # Calculate how many pending orders we need to maintain exactly 1
             pending_orders_needed = self._calculate_pending_orders_needed(cycle)
             
             if pending_orders_needed <= 0:
-                logger.debug(f"📊 Grid maintenance: Already have sufficient pending orders ({len(cycle.pending_orders)}/5)")
+                logger.debug(f"📊 Grid maintenance: Already have sufficient pending orders ({len(cycle.pending_orders)}/1)")
                 return True
-            logger.info(f"📋 AUTOMATIC GRID MAINTENANCE: Need to place {pending_orders_needed} more pending orders to maintain 5 pending orders (current: {len(cycle.pending_orders)})")
+            logger.info(f"📋 AUTOMATIC GRID MAINTENANCE: Need to place {pending_orders_needed} more pending order to maintain 1 pending order (current: {len(cycle.pending_orders)})")
             # Get grid parameters
             pip_value = self._get_pip_value()
             grid_interval_pips = self.get_cycle_config_value(cycle, 'grid_interval_pips', self.grid_interval_pips)
@@ -3928,6 +3934,11 @@ class MoveGuard(Strategy):
                             self._cancel_sell_pending_orders(cycle)
                         else:
                             self._cancel_buy_pending_orders(cycle)
+            
+            # Ensure we maintain only a single pending order; prune extras if any
+            if len(cycle.pending_orders) > 1:
+                logger.warning(f"🚨 Found {len(cycle.pending_orders)} pending orders; pruning to maintain only 1 pending order")
+                self._cancel_cycle_pending_orders(cycle)
             
             # CRITICAL: Use current cycle direction for ALL pending orders (don't change it mid-placement)
             # Store direction to ensure consistency throughout this function
@@ -4631,7 +4642,7 @@ class MoveGuard(Strategy):
                 'pending_levels': sorted(pending_levels),
                 'active_orders_count': len(active_orders),
                 'system_status': 'Active' if pending_orders else 'No pending orders',
-                'next_levels_needed': 3 - len(pending_orders) if len(pending_orders) < 3 else 0,
+                'next_levels_needed': 1 - len(pending_orders) if len(pending_orders) < 1 else 0,
                 'cycle_direction': getattr(cycle, 'direction', 'Unknown')
             }
             
@@ -4700,7 +4711,7 @@ class MoveGuard(Strategy):
             
             # IMMEDIATELY place next pending order to maintain grid ahead
             logger.info(f"🚀 AUTOMATIC NEXT ORDER PLACEMENT: Placing next pending order after activation of level {grid_level}")
-            next_order_success = self._maintain_pending_grid_orders(cycle, target_price, 5)
+            next_order_success = self._maintain_pending_grid_orders(cycle, target_price, 1)
             
             if next_order_success:
                 logger.info(f"✅ SUCCESS: Next pending order placed automatically after level {grid_level} activation")
