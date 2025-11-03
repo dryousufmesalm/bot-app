@@ -1821,11 +1821,20 @@ class MoveGuard(Strategy):
                 entry_interval_pips = self.get_cycle_entry_interval_pips(cycle)
                 initial_offset = entry_interval_pips * pip_value
 
+                # Cancel pending orders outside the zone based on current price
+                self._cancel_pending_orders_outside_zone(cycle, current_price)
+
                 active_order_count = len([o for o in getattr(cycle, 'orders', []) if o.get('status') == 'active'])
                 total_order_count = len([o for o in getattr(cycle, 'orders', [])])
                 # Get grid orders safely using helper method
                 grid_orders = self._get_grid_orders_safely(cycle)
                 active_grid_order_count = len([o for o in grid_orders if o.get('status') == 'active'])
+                
+                # Cancel pending orders outside zone boundaries based on current price position
+                # If price above upper, cancel pending orders below lower
+                # If price below lower, cancel pending orders above upper
+                if hasattr(cycle, 'pending_orders') and len(cycle.pending_orders) > 0:
+                    self._cancel_pending_orders_outside_zone(cycle, current_price)
                 
                 # Check trailing stop-loss first (for both BUY and SELL cycles)
                 if active_order_count > 0 and active_grid_order_count > 0:
@@ -4499,6 +4508,111 @@ class MoveGuard(Strategy):
             
         except Exception as e:
             logger.error(f"❌ Error cancelling BUY pending orders for cycle {cycle.cycle_id}: {str(e)}")
+            return False
+
+    def _cancel_pending_orders_outside_zone(self, cycle, current_price: float) -> bool:
+        """Cancel pending orders outside zone boundaries based on current price position
+        
+        - If current_price > upper_boundary: cancel pending orders below lower_boundary
+        - If current_price < lower_boundary: cancel pending orders above upper_boundary
+        """
+        try:
+            if not hasattr(cycle, 'pending_orders') or not cycle.pending_orders:
+                return True
+            
+            # Get zone boundaries
+            zone_data = cycle.zone_data if hasattr(cycle, 'zone_data') else {}
+            upper_boundary = zone_data.get('upper_boundary', 0.0)
+            lower_boundary = zone_data.get('lower_boundary', 0.0)
+            
+            if upper_boundary == 0.0 or lower_boundary == 0.0:
+                return False
+            
+            cancelled_count = 0
+            
+            # If current price is above upper boundary, cancel pending orders below lower boundary
+            if current_price > upper_boundary:
+                for pending_order in cycle.pending_orders[:]:
+                    order_price = pending_order.get('price', 0.0) or pending_order.get('target_price', 0.0)
+                    if order_price < lower_boundary:
+                        order_id = pending_order.get('order_id')
+                        grid_level = pending_order.get('grid_level')
+                        
+                        if order_id:
+                            result = self.meta_trader.cancel_pending_order(order_id, self.symbol)
+                            if result:
+                                cancelled_count += 1
+                                
+                                # Update status in main orders list
+                                for order in cycle.orders:
+                                    if order.get('order_id') == order_id:
+                                        order['status'] = 'cancelled'
+                                        order['cancelled_at'] = datetime.datetime.now().isoformat()
+                                        order['cancelled_reason'] = 'below_lower_when_price_above_upper'
+                                        break
+                                
+                                # Remove from pending orders tracking
+                                cycle.pending_orders.remove(pending_order)
+                                if grid_level is not None:
+                                    cycle.pending_order_levels.discard(grid_level)
+                                
+                                # Remove from main orders list if exists
+                                try:
+                                    cycle.orders.remove(pending_order)
+                                except ValueError:
+                                    pass
+                                
+                                logger.info(f"✅ Cancelled pending order {order_id} (level {grid_level}, price {order_price:.5f}) - below lower ({lower_boundary:.5f}) while price above upper ({upper_boundary:.5f})")
+                
+                if cancelled_count > 0:
+                    logger.info(f"🚨 Cancelled {cancelled_count} pending order(s) below lower boundary ({lower_boundary:.5f}) - current price ({current_price:.5f}) is above upper boundary ({upper_boundary:.5f})")
+                    # Sync to PocketBase
+                    self._sync_pending_orders_to_pocketbase(cycle)
+            
+            # If current price is below lower boundary, cancel pending orders above upper boundary
+            elif current_price < lower_boundary:
+                for pending_order in cycle.pending_orders[:]:
+                    order_price = pending_order.get('price', 0.0) or pending_order.get('target_price', 0.0)
+                    if order_price > upper_boundary:
+                        order_id = pending_order.get('order_id')
+                        grid_level = pending_order.get('grid_level')
+                        
+                        if order_id:
+                            result = self.meta_trader.cancel_pending_order(order_id, self.symbol)
+                            if result:
+                                cancelled_count += 1
+                                
+                                # Update status in main orders list
+                                for order in cycle.orders:
+                                    if order.get('order_id') == order_id:
+                                        order['status'] = 'cancelled'
+                                        order['cancelled_at'] = datetime.datetime.now().isoformat()
+                                        order['cancelled_reason'] = 'above_upper_when_price_below_lower'
+                                        break
+                                
+                                # Remove from pending orders tracking
+                                cycle.pending_orders.remove(pending_order)
+                                if grid_level is not None:
+                                    cycle.pending_order_levels.discard(grid_level)
+                                
+                                # Remove from main orders list if exists
+                                try:
+                                    cycle.orders.remove(pending_order)
+                                except ValueError:
+                                    pass
+                                
+                                logger.info(f"✅ Cancelled pending order {order_id} (level {grid_level}, price {order_price:.5f}) - above upper ({upper_boundary:.5f}) while price below lower ({lower_boundary:.5f})")
+                
+                if cancelled_count > 0:
+                    logger.info(f"🚨 Cancelled {cancelled_count} pending order(s) above upper boundary ({upper_boundary:.5f}) - current price ({current_price:.5f}) is below lower boundary ({lower_boundary:.5f})")
+                    # Sync to PocketBase
+                    self._sync_pending_orders_to_pocketbase(cycle)
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"❌ Error cancelling pending orders outside zone for cycle {cycle.cycle_id}: {str(e)}")
+            logger.error(traceback.format_exc())
             return False
 
     def _cancel_cycle_pending_orders(self, cycle) -> bool:
