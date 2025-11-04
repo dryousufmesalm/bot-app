@@ -2705,6 +2705,29 @@ class MoveGuard(Strategy):
                 logger.debug(f"No active orders to update SL for cycle {cycle.cycle_id} (pending orders: {len(pending_orders)})")
                 return False
             
+            # Check if grid 1 is the last active order and grid 2 is still pending
+            # If so, keep SL for grid 1 at initial SL pips and don't modify it to trailing till grid 2 gets activated
+            has_grid_1 = any(o.get('grid_level') == 1 for o in active_orders)
+            if has_grid_1:
+                # Get all grid levels from active orders (excluding grid level 0/None, only grid 1+)
+                grid_levels = [o.get('grid_level', 0) for o in active_orders if o.get('grid_level', 0) >= 1]
+                # Check if grid 1 is the last active order (max level is 1, meaning only grid 1, no grid 2+ active)
+                if grid_levels and max(grid_levels) == 1:
+                    # Check if grid 2 is still pending
+                    has_pending_grid_2 = False
+                    if hasattr(cycle, 'pending_order_levels'):
+                        has_pending_grid_2 = 2 in cycle.pending_order_levels
+                    # Also check in pending_orders list for safety
+                    if not has_pending_grid_2 and hasattr(cycle, 'pending_orders'):
+                        has_pending_grid_2 = any(o.get('grid_level') == 2 for o in cycle.pending_orders)
+                    
+                    if has_pending_grid_2:
+                        logger.info(f"🔒 Grid 1 is last active order and grid 2 is still pending - keeping initial SL pips for grid 1, skipping SL modification for cycle {cycle.cycle_id}")
+                        return False  # Return False to indicate no modification was made
+                    else:
+                        # Grid 1 is last active but grid 2 is not pending - allow SL modification
+                        logger.debug(f"Grid 1 is last active order but grid 2 is not pending - allowing SL modification")
+            
             logger.debug(f"Updating SL for {len(active_orders)} active orders, skipping {len(pending_orders)} pending orders")
             if len(active_orders)<=1:
                 logger.debug(f"Only one active order found for cycle {cycle.cycle_id}, skipping SL update")
@@ -3949,9 +3972,33 @@ class MoveGuard(Strategy):
                 logger.warning(f"🚨 Found {len(cycle.pending_orders)} pending orders; pruning to maintain only 1 pending order")
                 self._cancel_cycle_pending_orders(cycle)
             
-            # CRITICAL: Use current cycle direction for ALL pending orders (don't change it mid-placement)
-            # Store direction to ensure consistency throughout this function
-            order_direction = cycle.direction
+            # CRITICAL: Determine direction from current price above or below bounds and update cycle direction
+            # Get boundaries and calculate direction based on current price position
+            initial_offset = entry_interval_pips * pip_value
+            
+            # Determine direction based on current price vs boundaries
+            if current_price >= upper:
+                order_direction = 'BUY'
+                logger.info(f"🎯 Current price {current_price:.5f} >= upper {upper:.5f} → BUY direction")
+            elif current_price <= lower:
+                order_direction = 'SELL'
+                logger.info(f"🎯 Current price {current_price:.5f} <= lower {lower:.5f} → SELL direction")
+            else:
+                # Price is within bounds - use existing cycle direction
+                order_direction = cycle.direction
+                logger.info(f"🎯 Current price {current_price:.5f} within bounds → keeping existing direction: {order_direction}")
+            
+            # Update cycle direction if it changed
+            if order_direction != cycle.direction:
+                old_direction = cycle.direction
+                logger.info(f"🔄 Updating cycle direction from {old_direction} to {order_direction}")
+                # Cancel pending orders with old direction before updating
+                if old_direction == 'BUY':
+                    self._cancel_buy_pending_orders(cycle)
+                else:
+                    self._cancel_sell_pending_orders(cycle)
+                # Update cycle direction
+                cycle.direction = order_direction
             
             logger.info(f"📋 Placing {pending_orders_needed} pending {order_direction} orders - cycle direction: {order_direction}")
             
