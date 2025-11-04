@@ -2705,38 +2705,32 @@ class MoveGuard(Strategy):
                 logger.debug(f"No active orders to update SL for cycle {cycle.cycle_id} (pending orders: {len(pending_orders)})")
                 return False
             
-            # Check if grid 1 is the last active order and grid 2 is still pending
-            # If so, keep SL for grid 1 at initial SL pips and don't modify it to trailing till grid 2 gets activated
-            has_grid_1 = any(o.get('grid_level') == 1 for o in active_orders)
-            if has_grid_1:
-                # Get all grid levels from active orders (excluding grid level 0/None, only grid 1+)
-                grid_levels = [o.get('grid_level', 0) for o in active_orders if o.get('grid_level', 0) >= 1]
-                # Check if grid 1 is the last active order (max level is 1, meaning only grid 1, no grid 2+ active)
-                if grid_levels and max(grid_levels) == 1:
-                    # Check if grid 2 is still pending
-                    has_pending_grid_2 = False
-                    if hasattr(cycle, 'pending_order_levels'):
-                        has_pending_grid_2 = 2 in cycle.pending_order_levels
-                    # Also check in pending_orders list for safety
-                    if not has_pending_grid_2 and hasattr(cycle, 'pending_orders'):
-                        has_pending_grid_2 = any(o.get('grid_level') == 2 for o in cycle.pending_orders)
-                    
-                    if has_pending_grid_2:
-                        logger.info(f"🔒 Grid 1 is last active order and grid 2 is still pending - keeping initial SL pips for grid 1, skipping SL modification for cycle {cycle.cycle_id}")
-                        return False  # Return False to indicate no modification was made
-                    else:
-                        # Grid 1 is last active but grid 2 is not pending - allow SL modification
-                        logger.debug(f"Grid 1 is last active order but grid 2 is not pending - allowing SL modification")
+            # CRITICAL: When only grid 1 is active, keep its SL at initial SL pips from config
+            # Only update grid orders' SL to trailing SL after grid 2 is activated
+            # Get all grid levels from active orders (excluding grid level 0/None, only grid 1+)
+            grid_levels = [o.get('grid_level', 0) for o in active_orders if o.get('grid_level', 0) >= 1]
+            
+            # Check if only grid 1 is active (max level is 1, meaning no grid 2+ is active)
+            if grid_levels and max(grid_levels) == 1:
+                # Only grid 1 is active - keep it at initial SL pips, don't update to trailing SL
+                logger.info(f"🔒 Only grid 1 is active for cycle {cycle.cycle_id} - keeping initial SL pips from config, skipping trailing SL update")
+                return False  # Return False to indicate no modification was made (keeps initial SL)
             
             logger.debug(f"Updating SL for {len(active_orders)} active orders, skipping {len(pending_orders)} pending orders")
-            if len(active_orders)<=1:
-                logger.debug(f"Only one active order found for cycle {cycle.cycle_id}, skipping SL update")
+            # CRITICAL: Only update grid orders (grid_level >= 1), not initial orders (level 0)
+            # Filter to only grid orders for SL update
+            grid_orders_to_update = [o for o in active_orders if o.get('grid_level', 0) >= 1]
+            
+            if not grid_orders_to_update:
+                logger.debug(f"No grid orders (level >= 1) found for cycle {cycle.cycle_id}, skipping SL update")
                 return False
+            
+            logger.debug(f"Updating trailing SL for {len(grid_orders_to_update)} grid orders (grid 2+ is active)")
             updated_count = 0
             failed_count = 0
             closed_orders = 0
             
-            for order in active_orders:
+            for order in grid_orders_to_update:
                 order_id = order.get('ticket') or order.get('order_id')
                 if not order_id:
                     logger.warning(f"⚠️ Order missing ticket/order_id: {order}")
@@ -2751,6 +2745,33 @@ class MoveGuard(Strategy):
                         order['closed_reason'] = 'position_not_found'
                         order['closed_at'] = datetime.datetime.now().isoformat()
                         closed_orders += 1
+                        
+                        # CRITICAL: If a grid order (level >= 1) was closed, immediately close all other active grid orders
+                        # This ensures all grid orders close together
+                        grid_level = order.get('grid_level', 0)
+                        if isinstance(grid_level, (int, float)) and int(grid_level) >= 1:
+                            logger.info(f"🚨 Grid order {order_id} (level {grid_level}) was closed during SL update - closing all other active grid orders to keep them synchronized")
+                            remaining_active_orders = [o for o in active_orders 
+                                                      if o.get('grid_level', 0) >= 1
+                                                      and (o.get('ticket') or o.get('order_id')) != order_id
+                                                      and o.get('status') == 'active']
+                            
+                            for remaining_order in remaining_active_orders:
+                                remaining_order_id = remaining_order.get('ticket') or remaining_order.get('order_id')
+                                try:
+                                    # Close the remaining grid order immediately
+                                    close_result = self._close_order(remaining_order)
+                                    if close_result:
+                                        logger.info(f"✅ Closed remaining grid order {remaining_order_id} (level {remaining_order.get('grid_level')}) to keep synchronized")
+                                        remaining_order['status'] = 'closed'
+                                        remaining_order['closed_reason'] = 'synchronized_close'
+                                        remaining_order['closed_at'] = datetime.datetime.now().isoformat()
+                                        closed_orders += 1
+                                    else:
+                                        logger.warning(f"⚠️ Failed to close remaining grid order {remaining_order_id}")
+                                except Exception as close_error:
+                                    logger.error(f"❌ Error closing remaining grid order {remaining_order_id}: {close_error}")
+                        
                         continue
                     
                     # Modify the position's stop loss in MT5
@@ -2789,16 +2810,16 @@ class MoveGuard(Strategy):
                 self._update_cycle_in_database(cycle, force_update=True)
             
             if updated_count > 0:
-                logger.info(f"✅ Updated trailing SL to {new_trailing_sl:.5f} for {updated_count}/{len(active_orders)} orders in cycle {cycle.cycle_id}")
+                logger.info(f"✅ Updated trailing SL to {new_trailing_sl:.5f} for {updated_count}/{len(grid_orders_to_update)} grid orders in cycle {cycle.cycle_id}")
                 # Log each order's new SL for debugging
-                for order in active_orders:
+                for order in grid_orders_to_update:
                     order_id = order.get('ticket') or order.get('order_id')
                     logger.info(f"📊 Order {order_id} (Grid {order.get('grid_level', '?')}) SL updated to {new_trailing_sl:.5f}")
                 return True
             else:
-                logger.warning(f"⚠️ Failed to update trailing SL for any orders in cycle {cycle.cycle_id} ({failed_count} failures, {closed_orders} closed)")
+                logger.warning(f"⚠️ Failed to update trailing SL for any grid orders in cycle {cycle.cycle_id} ({failed_count} failures, {closed_orders} closed)")
                 # Log details about why it failed
-                logger.warning(f"🔍 Active orders in cycle: {[o.get('ticket') for o in active_orders]}")
+                logger.warning(f"🔍 Grid orders in cycle: {[o.get('ticket') for o in grid_orders_to_update]}")
                 return False
                 
         except Exception as e:
@@ -3086,6 +3107,7 @@ class MoveGuard(Strategy):
                     zone_threshold_pips = 50.0
                 
                 # Calculate boundaries with validation
+                # At the beginning of cycle: distance between upper and lower boundary should be zone_pips * 2
                 zone_threshold = zone_threshold_pips * pip_value 
                 upper_boundary = base + zone_threshold
                 lower_boundary = base - zone_threshold
@@ -3094,22 +3116,23 @@ class MoveGuard(Strategy):
                 if upper_boundary <= lower_boundary:
                     logger.error(f"❌ Invalid boundaries: upper={upper_boundary}, lower={lower_boundary}")
                     # Use fallback boundaries
-                    upper_boundary = base + (50.0 * 0.0001)
-                    lower_boundary = base - (50.0 * 0.0001)
+                    upper_boundary = base + (50.0 * 0.0001 * 2)
+                    lower_boundary = base - (50.0 * 0.0001 * 2)
                 
                 zone_data_val = {
                     'base_price': base,
                     'upper_boundary': upper_boundary,
                     'lower_boundary': lower_boundary,
                     'movement_mode': getattr(self, 'zone_movement_mode', 'Move Both Sides'),
-                    'last_movement': None
+                    'last_movement': None,
+                    'grid_0_closed': False  # Track if grid 0 has closed
                 }
                 
                 # Validate distance between boundaries
                 distance = upper_boundary - lower_boundary
-                expected_distance = zone_threshold_pips * pip_value
-                logger.info(f"✅ Calculated zone boundaries: base={base:.5f}, upper={upper_boundary:.5f}, lower={lower_boundary:.5f}")
-                logger.info(f"📏 Zone distance: {distance:.5f} (expected: {expected_distance:.5f}, zone_threshold: {zone_threshold_pips} pips)")
+                expected_distance = zone_threshold_pips * pip_value * 2  # Initial distance should be zone_pips * 2
+                logger.info(f"✅ Calculated initial zone boundaries: base={base:.5f}, upper={upper_boundary:.5f}, lower={lower_boundary:.5f}")
+                logger.info(f"📏 Initial zone distance: {distance:.5f} (expected: {expected_distance:.5f}, zone_threshold: {zone_threshold_pips} pips * 2)")
             upper_bound_val = self._safe_float_value(zone_data_val.get('upper_boundary', 0.0))
             lower_bound_val = self._safe_float_value(zone_data_val.get('lower_boundary', 0.0))
             
@@ -3471,30 +3494,36 @@ class MoveGuard(Strategy):
             # Calculate stop loss and take profit
             pip_value = self._get_pip_value()
             
-            # CRITICAL FIX: ALL grid orders should have SL set to current trailing SL
-            # This ensures MT5 protects them even if bot crashes
+            # CRITICAL: Grid 1 must ALWAYS use initial_stop_loss_pips (matching initial order)
+            # Grid 2+ can use trailing SL if available
             order_sl = 0
             
-            # Get current trailing SL if it exists
-            if hasattr(cycle, 'trailing_stop_loss') and cycle.trailing_stop_loss is not None and cycle.trailing_stop_loss > 0:
-                # Use existing trailing SL
-                order_sl = cycle.trailing_stop_loss
-                logger.debug(f"📊 Using existing trailing SL for BUY grid order: {order_sl:.5f}")
+            if grid_level == 1:
+                # Grid 1: ALWAYS use initial_stop_loss_pips, never use trailing SL
+                # This ensures grid 1's SL matches the initial order's SL pips
+                order_sl = order_price - (initial_stop_loss_pips * pip_value)
+                logger.info(f"📊 Grid 1 BUY order: Using initial_stop_loss_pips ({initial_stop_loss_pips}) = {order_sl:.5f} (matching initial order SL)")
             else:
-                # Calculate SL based on initial_stop_loss_pips from configuration
-                upper_boundary = cycle.zone_data.get('upper_boundary', 0.0)
-                
-                if hasattr(cycle, 'highest_buy_price') and cycle.highest_buy_price > 0:
-                    order_sl = cycle.highest_buy_price - (initial_stop_loss_pips * pip_value)
+                # Grid 2+: Use trailing SL if available, otherwise use initial_stop_loss_pips
+                if hasattr(cycle, 'trailing_stop_loss') and cycle.trailing_stop_loss is not None and cycle.trailing_stop_loss > 0:
+                    # Use existing trailing SL for grid 2+
+                    order_sl = cycle.trailing_stop_loss
+                    logger.debug(f"📊 Grid {grid_level} BUY order: Using existing trailing SL: {order_sl:.5f}")
                 else:
-                    # First order - use order price as reference with initial_stop_loss_pips
-                    order_sl = order_price - (initial_stop_loss_pips * pip_value)
-                
-                # Cap at upper boundary if zone movement mode requires it
-                if cycle.zone_movement_mode == 'Move Both Sides' or cycle.zone_movement_mode == 'Move Up Only':
-                    order_sl = max(order_sl, upper_boundary)
-                
-                logger.debug(f"📊 Calculated initial SL for BUY grid order using initial_stop_loss_pips ({initial_stop_loss_pips}): {order_sl:.5f}")
+                    # Calculate SL based on initial_stop_loss_pips from configuration
+                    upper_boundary = cycle.zone_data.get('upper_boundary', 0.0)
+                    
+                    if hasattr(cycle, 'highest_buy_price') and cycle.highest_buy_price > 0:
+                        order_sl = cycle.highest_buy_price - (initial_stop_loss_pips * pip_value)
+                    else:
+                        # Use order price as reference with initial_stop_loss_pips
+                        order_sl = order_price - (initial_stop_loss_pips * pip_value)
+                    
+                    # Cap at upper boundary if zone movement mode requires it
+                    if cycle.zone_movement_mode == 'Move Both Sides' or cycle.zone_movement_mode == 'Move Up Only':
+                        order_sl = max(order_sl, upper_boundary)
+                    
+                    logger.debug(f"📊 Grid {grid_level} BUY order: Calculated SL using initial_stop_loss_pips ({initial_stop_loss_pips}): {order_sl:.5f}")
             
             # Validate stop loss is reasonable (at least 1 pip away from order price)
             min_sl_distance = pip_value * 1.0  # 1 pip minimum
@@ -3539,6 +3568,7 @@ class MoveGuard(Strategy):
                     'is_grid': True,
                     'order_type': f'grid_{grid_level}',
                     'status': 'active',
+                    'stop_loss': order_sl,  # Store the SL that was set
                     'placed_at': datetime.datetime.now().isoformat(),
                     'profit': 0.0,
                     'profit_pips': 0.0,
@@ -3636,30 +3666,36 @@ class MoveGuard(Strategy):
             # Calculate stop loss and take profit
             pip_value = self._get_pip_value()
 
-            # CRITICAL FIX: ALL grid orders should have SL set to current trailing SL
-            # This ensures MT5 protects them even if bot crashes
+            # CRITICAL: Grid 1 must ALWAYS use initial_stop_loss_pips (matching initial order)
+            # Grid 2+ can use trailing SL if available
             order_sl = 0
             
-            # Get current trailing SL if it exists
-            if hasattr(cycle, 'trailing_stop_loss') and cycle.trailing_stop_loss is not None and cycle.trailing_stop_loss > 0:
-                # Use existing trailing SL
-                order_sl = cycle.trailing_stop_loss
-                logger.debug(f"📊 Using existing trailing SL for SELL grid order: {order_sl:.5f}")
+            if grid_level == 1:
+                # Grid 1: ALWAYS use initial_stop_loss_pips, never use trailing SL
+                # This ensures grid 1's SL matches the initial order's SL pips
+                order_sl = order_price + (initial_stop_loss_pips * pip_value)
+                logger.info(f"📊 Grid 1 SELL order: Using initial_stop_loss_pips ({initial_stop_loss_pips}) = {order_sl:.5f} (matching initial order SL)")
             else:
-                # Calculate SL based on initial_stop_loss_pips from configuration
-                lower_boundary = cycle.zone_data.get('lower_boundary', 0.0)
-                
-                if hasattr(cycle, 'lowest_sell_price') and cycle.lowest_sell_price < 999999.0:
-                    order_sl = cycle.lowest_sell_price + (initial_stop_loss_pips * pip_value)
+                # Grid 2+: Use trailing SL if available, otherwise use initial_stop_loss_pips
+                if hasattr(cycle, 'trailing_stop_loss') and cycle.trailing_stop_loss is not None and cycle.trailing_stop_loss > 0:
+                    # Use existing trailing SL for grid 2+
+                    order_sl = cycle.trailing_stop_loss
+                    logger.debug(f"📊 Grid {grid_level} SELL order: Using existing trailing SL: {order_sl:.5f}")
                 else:
-                    # First order - use order price as reference with initial_stop_loss_pips
-                    order_sl = order_price + (initial_stop_loss_pips * pip_value)
-                
-                # Cap at lower boundary if zone movement mode requires it
-                if cycle.zone_movement_mode == 'Move Both Sides' or cycle.zone_movement_mode == 'Move Down Only':
-                    order_sl = min(order_sl, lower_boundary)
-                
-                logger.debug(f"📊 Calculated initial SL for SELL grid order using initial_stop_loss_pips ({initial_stop_loss_pips}): {order_sl:.5f}")
+                    # Calculate SL based on initial_stop_loss_pips from configuration
+                    lower_boundary = cycle.zone_data.get('lower_boundary', 0.0)
+                    
+                    if hasattr(cycle, 'lowest_sell_price') and cycle.lowest_sell_price < 999999.0:
+                        order_sl = cycle.lowest_sell_price + (initial_stop_loss_pips * pip_value)
+                    else:
+                        # Use order price as reference with initial_stop_loss_pips
+                        order_sl = order_price + (initial_stop_loss_pips * pip_value)
+                    
+                    # Cap at lower boundary if zone movement mode requires it
+                    if cycle.zone_movement_mode == 'Move Both Sides' or cycle.zone_movement_mode == 'Move Down Only':
+                        order_sl = min(order_sl, lower_boundary)
+                    
+                    logger.debug(f"📊 Grid {grid_level} SELL order: Calculated SL using initial_stop_loss_pips ({initial_stop_loss_pips}): {order_sl:.5f}")
             
             # Validate stop loss is reasonable (at least 1 pip away from order price)
             min_sl_distance = pip_value * 1.0  # 1 pip minimum
@@ -3704,6 +3740,7 @@ class MoveGuard(Strategy):
                     'is_grid': True,
                     'order_type': f'grid_{grid_level}',
                     'status': 'active',
+                    'stop_loss': order_sl,  # Store the SL that was set
                     'placed_at': datetime.datetime.now().isoformat(),
                     'profit': 0.0,
                     'profit_pips': 0.0,
@@ -3854,45 +3891,61 @@ class MoveGuard(Strategy):
             return False
 
     def _validate_pending_orders_grid_levels(self, cycle) -> bool:
-        """Validate that when no active orders exist, there is at most 1 pending order and its level is 1"""
+        """Validate pending grid orders are sequential and continue from active grid orders
+        
+        Rules:
+        - If no active grid orders: pending orders must start from grid level 1, maximum 1 pending order
+        - If active grid orders exist: pending orders must continue sequentially from highest active level
+        - Grid orders must always be sequential: 1, 2, 3, 4, 5...
+        """
         try:
-            # Check if there are no active orders
+            # Get active orders
             active_orders = [o for o in cycle.orders if o.get('status') == 'active']
-            if len(active_orders) > 0:
-                # If there are active orders, validation passes
+            active_grid_orders = [o for o in active_orders if o.get('grid_level', 0) >= 1]
+            
+            # Get pending grid orders (level >= 1)
+            pending_grid_orders = [o for o in getattr(cycle, 'pending_orders', []) if o.get('grid_level', 0) >= 1]
+            
+            if not pending_grid_orders:
+                # No pending grid orders - validation passes
                 return True
             
-            # If no active orders, check pending orders grid levels
-            if len(cycle.pending_orders) == 0:
-                # No pending orders, validation passes
+            pending_levels = sorted([o.get('grid_level', 0) for o in pending_grid_orders])
+            
+            if len(active_grid_orders) == 0:
+                # No active grid orders - pending must start from grid level 1, max 1 pending
+                if len(pending_levels) > 1:
+                    logger.warning(f"⚠️ Pending orders grid levels validation failed:")
+                    logger.warning(f"   - Expected: [1] or [] (no active grid orders)")
+                    logger.warning(f"   - Actual: {pending_levels}")
+                    return False
+                
+                if pending_levels and pending_levels[0] != 1:
+                    logger.warning(f"⚠️ Pending orders grid levels validation failed:")
+                    logger.warning(f"   - Expected: [1] or [] (must start from grid 1 when no active grid orders)")
+                    logger.warning(f"   - Actual: {pending_levels}")
+                    return False
+                
+                logger.debug(f"✅ Pending orders grid levels validation passed: {pending_levels} (no active grid orders)")
                 return True
-            
-            # Get all pending order grid levels
-            pending_levels = []
-            for order in cycle.pending_orders:
-                grid_level = order.get('grid_level', 0)
-                pending_levels.append(grid_level)
-            
-            # Sort the levels
-            pending_levels.sort()
-            
-            # Enforce at most one pending level and it must be level 1
-            if len(pending_levels) > 1:
-                logger.warning(f"⚠️ Pending orders grid levels validation failed:")
-                logger.warning(f"   - Expected levels: [1] or []")
-                logger.warning(f"   - Actual levels: {pending_levels}")
-                logger.warning(f"   - No active orders found, cancelling all pending orders")
-                return False
-            
-            if pending_levels != [1]:
-                logger.warning(f"⚠️ Pending orders grid levels validation failed:")
-                logger.warning(f"   - Expected levels: [1] or []")
-                logger.warning(f"   - Actual levels: {pending_levels}")
-                logger.warning(f"   - No active orders found, cancelling all pending orders")
-                return False
-            
-            logger.debug(f"✅ Pending orders grid levels validation passed: {pending_levels}")
-            return True
+            else:
+                # Active grid orders exist - pending must continue sequentially
+                active_levels = sorted([o.get('grid_level', 0) for o in active_grid_orders])
+                max_active_level = max(active_levels) if active_levels else 0
+                
+                # Check if pending levels are sequential starting from max_active_level + 1
+                expected_start = max_active_level + 1
+                expected_sequence = list(range(expected_start, expected_start + len(pending_levels)))
+                
+                if pending_levels != expected_sequence:
+                    logger.warning(f"⚠️ Pending orders grid levels validation failed:")
+                    logger.warning(f"   - Active grid levels: {active_levels}")
+                    logger.warning(f"   - Expected pending: {expected_sequence} (sequential continuation)")
+                    logger.warning(f"   - Actual pending: {pending_levels}")
+                    return False
+                
+                logger.debug(f"✅ Pending orders grid levels validation passed: {pending_levels} (continues from active: {active_levels})")
+                return True
             
         except Exception as e:
             logger.error(f"❌ Error validating pending orders grid levels: {str(e)}")
@@ -5105,7 +5158,58 @@ class MoveGuard(Strategy):
                         # Log the closure
                         direction = order.get('direction', 'UNKNOWN')
                         grid_level = order.get('grid_level', 'N/A')
+                        is_initial = order.get('is_initial', False)
                         logger.info(f"🔍 Order {order_id} ({direction}, level {grid_level}) was closed in MT5 - status updated to 'closed'")
+                        
+                        # CRITICAL: If grid 0 (initial order) closes, update zone boundaries to zone_pips distance only
+                        # At beginning: distance = zone_pips * 2
+                        # After grid 0 closes: distance = zone_pips only
+                        if (grid_level == 0 or is_initial) and not cycle.zone_data.get('grid_0_closed', False):
+                            logger.info(f"🎯 Grid 0 (initial order) closed for cycle {cycle.cycle_id} - updating zone boundaries to zone_pips distance only")
+                            pip_value = self._get_pip_value()
+                            zone_threshold_pips = self.get_cycle_zone_threshold_pips(cycle)
+                            zone_threshold = zone_threshold_pips * pip_value
+                            
+                            # Get current base price (midpoint of current boundaries)
+                            current_upper = cycle.zone_data.get('upper_boundary', 0.0)
+                            current_lower = cycle.zone_data.get('lower_boundary', 0.0)
+                            base_price = (current_upper + current_lower) / 2
+                            
+                            # Update boundaries to have distance = zone_pips only (half on each side)
+                            new_upper = base_price + (zone_threshold / 2)
+                            new_lower = base_price - (zone_threshold / 2)
+                            
+                            # Update zone data
+                            cycle.zone_data['upper_boundary'] = new_upper
+                            cycle.zone_data['lower_boundary'] = new_lower
+                            cycle.zone_data['base_price'] = base_price
+                            cycle.zone_data['grid_0_closed'] = True
+                            
+                            new_distance = new_upper - new_lower
+                            logger.info(f"✅ Zone boundaries updated after grid 0 closed: upper={new_upper:.5f}, lower={new_lower:.5f}")
+                            logger.info(f"📏 Zone distance changed to: {new_distance:.5f} (zone_pips only: {zone_threshold_pips} pips)")
+                        
+                        # CRITICAL: If a grid order (level >= 1) was closed, immediately close all other active grid orders
+                        # This ensures all grid orders close together, preventing grid 2 from closing before grid 1 and 3
+                        if grid_level != 'N/A' and isinstance(grid_level, (int, float)) and int(grid_level) >= 1:
+                            logger.info(f"🚨 Grid order {order_id} (level {grid_level}) was closed - closing all other active grid orders to keep them synchronized")
+                            remaining_active_orders = [o for o in cycle.orders 
+                                                      if o.get('status') == 'active' 
+                                                      and o.get('grid_level', 0) >= 1
+                                                      and (o.get('ticket') or o.get('order_id')) != order_id]
+                            
+                            for remaining_order in remaining_active_orders:
+                                remaining_order_id = remaining_order.get('ticket') or remaining_order.get('order_id')
+                                try:
+                                    # Close the remaining grid order immediately
+                                    close_result = self._close_order(remaining_order)
+                                    if close_result:
+                                        logger.info(f"✅ Closed remaining grid order {remaining_order_id} (level {remaining_order.get('grid_level')}) to keep synchronized")
+                                        closed_orders_count += 1
+                                    else:
+                                        logger.warning(f"⚠️ Failed to close remaining grid order {remaining_order_id}")
+                                except Exception as close_error:
+                                    logger.error(f"❌ Error closing remaining grid order {remaining_order_id}: {close_error}")
                         
                         # Update profit data if available
                         try:
@@ -5125,6 +5229,95 @@ class MoveGuard(Strategy):
             # If any orders were closed, sync to PocketBase and log status
             if closed_orders_count > 0:
                 logger.info(f"📊 Cycle {cycle.cycle_id}: {closed_orders_count} orders were closed in MT5 and status updated")
+                
+                # CRITICAL: Check if grid orders closed and reset grid ordering if needed
+                # After grid orders close, check if no active grid orders remain
+                remaining_active_orders = [o for o in cycle.orders if o.get('status') == 'active']
+                active_grid_orders = [o for o in remaining_active_orders if o.get('grid_level', 0) >= 1]
+                
+                if len(active_grid_orders) == 0:
+                    # No active grid orders remain - check pending grid orders
+                    logger.info(f"🔄 No active grid orders remaining for cycle {cycle.cycle_id} - validating pending grid orders")
+                    
+                    if hasattr(cycle, 'pending_orders') and cycle.pending_orders:
+                        # Get all pending grid orders (level >= 1)
+                        pending_grid_orders = [o for o in cycle.pending_orders if o.get('grid_level', 0) >= 1]
+                        
+                        if pending_grid_orders:
+                            # Get pending grid levels and sort them
+                            pending_grid_levels = sorted([o.get('grid_level', 0) for o in pending_grid_orders])
+                            
+                            # Grid orders must always start from level 1, 2, 3, 4, 5... sequentially
+                            # If pending orders don't start from grid level 1, delete them all
+                            if not pending_grid_levels or pending_grid_levels[0] != 1:
+                                logger.warning(f"🚨 Pending grid orders don't start from grid level 1 - cancelling all pending grid orders")
+                                logger.warning(f"   - Pending grid levels: {pending_grid_levels}")
+                                logger.warning(f"   - Expected: Grid orders should start from level 1 after all grid orders close")
+                                
+                                # Cancel all pending grid orders
+                                for pending_order in pending_grid_orders[:]:
+                                    order_id = pending_order.get('order_id')
+                                    grid_level = pending_order.get('grid_level')
+                                    if order_id:
+                                        try:
+                                            result = self.meta_trader.cancel_pending_order(order_id, self.symbol)
+                                            if result:
+                                                logger.info(f"✅ Cancelled pending grid order {order_id} (level {grid_level}) - not starting from grid 1")
+                                                # Remove from pending orders
+                                                cycle.pending_orders.remove(pending_order)
+                                                if hasattr(cycle, 'pending_order_levels'):
+                                                    cycle.pending_order_levels.discard(grid_level)
+                                                # Update status in main orders list
+                                                for order in cycle.orders:
+                                                    if order.get('order_id') == order_id:
+                                                        order['status'] = 'cancelled'
+                                                        order['cancelled_at'] = datetime.datetime.now().isoformat()
+                                                        order['cancelled_reason'] = 'grid_reset_after_close'
+                                                        break
+                                        except Exception as cancel_error:
+                                            logger.error(f"❌ Error cancelling pending grid order {order_id}: {cancel_error}")
+                                    
+                                logger.info(f"🔄 Reset grid ordering: Cancelled all pending grid orders that didn't start from level 1")
+                                logger.info(f"   - Grid orders will now restart from level 1 on next placement")
+                            else:
+                                # Pending orders start from grid 1, but check if they're sequential (1, 2, 3, 4, 5...)
+                                expected_sequence = list(range(1, len(pending_grid_levels) + 1))
+                                if pending_grid_levels != expected_sequence:
+                                    logger.warning(f"🚨 Pending grid orders are not sequential - cancelling all pending grid orders")
+                                    logger.warning(f"   - Pending grid levels: {pending_grid_levels}")
+                                    logger.warning(f"   - Expected sequence: {expected_sequence}")
+                                    logger.warning(f"   - Grid orders must be sequential: 1, 2, 3, 4, 5...")
+                                    
+                                    # Cancel all pending grid orders
+                                    for pending_order in pending_grid_orders[:]:
+                                        order_id = pending_order.get('order_id')
+                                        grid_level = pending_order.get('grid_level')
+                                        if order_id:
+                                            try:
+                                                result = self.meta_trader.cancel_pending_order(order_id, self.symbol)
+                                                if result:
+                                                    logger.info(f"✅ Cancelled pending grid order {order_id} (level {grid_level}) - not sequential")
+                                                    # Remove from pending orders
+                                                    cycle.pending_orders.remove(pending_order)
+                                                    if hasattr(cycle, 'pending_order_levels'):
+                                                        cycle.pending_order_levels.discard(grid_level)
+                                                    # Update status in main orders list
+                                                    for order in cycle.orders:
+                                                        if order.get('order_id') == order_id:
+                                                            order['status'] = 'cancelled'
+                                                            order['cancelled_at'] = datetime.datetime.now().isoformat()
+                                                            order['cancelled_reason'] = 'grid_not_sequential'
+                                                            break
+                                            except Exception as cancel_error:
+                                                logger.error(f"❌ Error cancelling pending grid order {order_id}: {cancel_error}")
+                                    
+                                    logger.info(f"🔄 Reset grid ordering: Cancelled all non-sequential pending grid orders")
+                                    logger.info(f"   - Grid orders will now restart from level 1 on next placement")
+                                else:
+                                    logger.debug(f"✅ Pending grid orders are valid: sequential starting from level 1: {pending_grid_levels}")
+                    
+                    # Reset grid tracking to start fresh from grid 1
+                    logger.info(f"🔄 Grid orders closed - resetting to start from grid level 1 on next placement")
                 
                 # Log comprehensive order lifecycle status
                 self._log_order_lifecycle_status(cycle)
@@ -5404,8 +5597,8 @@ class MoveGuard(Strategy):
             
             # Initialize variables with current values as defaults
             new_base = cycle.zone_data.get('base_price', base_price)
-            new_upper = cycle.zone_data.get('upper_boundary', base_price + (zone_threshold_pips * pip_value ))
-            new_lower = cycle.zone_data.get('lower_boundary', base_price - (zone_threshold_pips * pip_value ))
+            new_upper = cycle.zone_data.get('upper_boundary', base_price + (zone_threshold_pips * pip_value / 2))
+            new_lower = cycle.zone_data.get('lower_boundary', base_price - (zone_threshold_pips * pip_value / 2))
             
             if movement_mode == 'No Move':
                 # Keep original boundaries
@@ -5472,12 +5665,15 @@ class MoveGuard(Strategy):
         try:
             # Get zone data from cycle
             if not hasattr(cycle, 'zone_data') or not cycle.zone_data:
+                # Initialize zone data - at beginning: distance = zone_pips * 2
+                zone_threshold = self.get_cycle_zone_threshold_pips(cycle) * self._get_pip_value()
                 cycle.zone_data = {
                     'base_price': cycle.entry_price,
-                    'upper_boundary': cycle.entry_price + (self.get_cycle_zone_threshold_pips(cycle) * self._get_pip_value()),
-                    'lower_boundary': cycle.entry_price - (self.get_cycle_zone_threshold_pips(cycle) * self._get_pip_value() ),
+                    'upper_boundary': cycle.entry_price + zone_threshold,  # Initial: zone_pips * 2 distance
+                    'lower_boundary': cycle.entry_price - zone_threshold,  # Initial: zone_pips * 2 distance
                     'movement_mode': self.zone_movement_mode,
-                    'last_movement': None
+                    'last_movement': None,
+                    'grid_0_closed': False  # Track if grid 0 has closed
                 }
             
             zone_data = cycle.zone_data
@@ -6891,7 +7087,9 @@ class MoveGuard(Strategy):
             has_grid_orders = len(grid_orders) > 0
             
             if not has_grid_orders:
-                # No grid orders yet - use initial order entry price
+                # No grid orders yet - check if grid_0 has closed
+                grid_0_closed = cycle.zone_data.get('grid_0_closed', False) if hasattr(cycle, 'zone_data') and cycle.zone_data else False
+                
                 if active_orders:
                     initial_order = None
                     for order in active_orders:
@@ -6902,22 +7100,34 @@ class MoveGuard(Strategy):
                     if initial_order:
                         entry_price = initial_order.get('price', cycle.entry_price)
                         
-                        if cycle.direction == 'BUY':
-                            # For BUY cycles: upper = entry + zone_threshold, lower = entry - zone_threshold
+                        if not grid_0_closed:
+                            # Before grid 0 closes: distance = zone_pips * 2
                             upper = entry_price + zone_threshold
                             lower = entry_price - zone_threshold
-                        else:  # SELL
-                            # For SELL cycles: upper = entry + zone_threshold, lower = entry - zone_threshold
-                            upper = entry_price + zone_threshold
-                            lower = entry_price - zone_threshold
+                        else:
+                            # After grid 0 closes: distance = zone_pips only
+                            upper = entry_price + (zone_threshold / 2)
+                            lower = entry_price - (zone_threshold / 2)
                     else:
                         # Fallback to cycle entry price
-                        upper = cycle.entry_price + zone_threshold
-                        lower = cycle.entry_price - zone_threshold
+                        if not grid_0_closed:
+                            # Before grid 0 closes: distance = zone_pips * 2
+                            upper = cycle.entry_price + zone_threshold
+                            lower = cycle.entry_price - zone_threshold
+                        else:
+                            # After grid 0 closes: distance = zone_pips only
+                            upper = cycle.entry_price + (zone_threshold / 2)
+                            lower = cycle.entry_price - (zone_threshold / 2)
                 else:
                     # No orders yet - use cycle entry price
-                    upper = cycle.entry_price + zone_threshold
-                    lower = cycle.entry_price - zone_threshold
+                    if not grid_0_closed:
+                        # Before grid 0 closes: distance = zone_pips * 2
+                        upper = cycle.entry_price + zone_threshold
+                        lower = cycle.entry_price - zone_threshold
+                    else:
+                        # After grid 0 closes: distance = zone_pips only
+                        upper = cycle.entry_price + (zone_threshold / 2)
+                        lower = cycle.entry_price - (zone_threshold / 2)
             else:
                 # We have grid orders - adjust boundaries based on direction
                 if cycle.direction == 'BUY':
@@ -6945,11 +7155,19 @@ class MoveGuard(Strategy):
             
         except Exception as e:
             logger.error(f"❌ Error calculating proper boundaries: {str(e)}")
-            # Fallback to original calculation
+            # Fallback to original calculation - check if grid_0 has closed
             pip_value = self._get_pip_value()
             zone_threshold = self.get_cycle_zone_threshold_pips(cycle) * pip_value
-            upper = cycle.entry_price + zone_threshold
-            lower = cycle.entry_price - zone_threshold
+            grid_0_closed = cycle.zone_data.get('grid_0_closed', False) if hasattr(cycle, 'zone_data') and cycle.zone_data else False
+            
+            if not grid_0_closed:
+                # Before grid 0 closes: distance = zone_pips * 2
+                upper = cycle.entry_price + zone_threshold
+                lower = cycle.entry_price - zone_threshold
+            else:
+                # After grid 0 closes: distance = zone_pips only
+                upper = cycle.entry_price + (zone_threshold / 2)
+                lower = cycle.entry_price - (zone_threshold / 2)
             return upper, lower
 
     def _sync_grid_0_sl_on_activation(self, cycle, direction: str):
