@@ -4002,6 +4002,19 @@ class MoveGuard(Strategy):
             
             logger.info(f"📋 Placing {pending_orders_needed} pending {order_direction} orders - cycle direction: {order_direction}")
             
+            # Check if there's an active initial order (grid 0) of the same direction
+            # Don't place pending orders if initial order is still active
+            active_orders = [o for o in getattr(cycle, 'orders', []) if o.get('status') == 'active']
+            active_initial_order = None
+            for order in active_orders:
+                if order.get('grid_level', 0) == 0 and order.get('direction') == order_direction:
+                    active_initial_order = order
+                    break
+            
+            if active_initial_order:
+                logger.info(f"🔒 Active {order_direction} initial order (grid 0) found - skipping pending {order_direction} order placement for cycle {cycle.cycle_id}")
+                return True  # Return True to indicate we successfully handled the request (by skipping)
+            
             if order_direction == 'BUY':
                 # Check if this is a grid restart scenario
                 grid_restart_completed = getattr(cycle, 'grid_restart_completed', False)
