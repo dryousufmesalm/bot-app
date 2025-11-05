@@ -6461,74 +6461,129 @@ class MoveGuard(Strategy):
             return False
 
     # ==================== ORDER STATUS TRACKING ====================
+    # MT5 Order Tracking System:
+    # 
+    # This section provides comprehensive order tracking functionality that monitors all orders
+    # in MT5 and automatically updates their status when they are closed.
+    # 
+    # Main Functions:
+    # 1. _track_and_update_order_status() - Main entry point called every 5 seconds from monitoring loop
+    # 2. _monitor_active_orders_status(cycle) - Comprehensive cycle-level order monitoring
+    # 3. _order_exists_in_mt5(order_id) - Checks if order exists in MT5 (both positions and pending orders)
+    # 
+    # Flow: Monitoring loop -> _track_and_update_order_status() -> _monitor_active_orders_status() -> 
+    #       _order_exists_in_mt5() -> Update status -> Sync to PocketBase
 
     def _track_and_update_order_status(self):
-        """Track and update order status for all active cycles with profit calculations"""
+        """Track and update order status for all active cycles - comprehensive MT5 order tracking
+        
+        This function checks all active orders in all active cycles and updates their status
+        to 'closed' if they no longer exist in MT5 (either as active positions or pending orders).
+        """
         try:
             active_cycles = self.multi_cycle_manager.get_all_active_cycles()
+            
+            if not active_cycles:
+                return
+            
+            total_cycles_checked = 0
+            total_orders_checked = 0
+            total_orders_closed = 0
             
             for cycle in active_cycles:
                 if cycle.status != 'active':
                     continue
-                    
+                
+                total_cycles_checked += 1
                 orders_updated = False
+                cycle_orders_closed = 0
                 
-                # Check each active order in the cycle
-                for order in cycle.orders:
-                    if order.get('status') != 'active':
-                        continue
-                        
-                    order_id = order.get('order_id') or order.get('ticket')
-                    if not order_id:
-                        continue
-                    
-                    # Check if order still exists in MT5
-                    if not self._order_exists_in_mt5(order_id):
-                        # Order no longer exists - preserve profit before marking as closed
-                        logger.info(f"🔄 Order {order_id} no longer exists in MT5 - preserving profit before closure")
-                        
-                        # Try to preserve profit before closure
-                        profit_preserved = self._preserve_order_profit_before_closure(order)
-                        
-                        # Try to get the last known profit from the order itself
-                        last_profit = order.get('profit', 0.0)
-                        last_profit_pips = order.get('profit_pips', 0.0)
-                        
-                        # SPECIAL HANDLING: For initial orders, ensure we have profit data
-                        is_initial_order = order.get('is_initial', False) or order.get('order_type') == 'grid_0'
-                        if is_initial_order and last_profit == 0.0:
-                            logger.warning(f"⚠️ Initial order {order_id} has no profit data - attempting emergency profit calculation")
-                            
-                        # If no profit data exists, try to calculate from MT5 one last time
-                        if last_profit == 0.0:
-                            order_profit = self._calculate_order_profit(order)
-                            last_profit = order_profit['profit']
-                            last_profit_pips = order_profit['profit_pips']
-                            
-                            # Log if we still have no profit data for initial orders
-                            if is_initial_order and last_profit == 0.0:
-                                logger.error(f"❌ CRITICAL: Initial order {order_id} still has no profit data after emergency calculation!")
-                        
-                        # Mark order as closed with preserved profit
-                        order['status'] = 'closed'
-                        order['closed_at'] = datetime.datetime.now().isoformat()
-                        order['profit'] = last_profit
-                        order['profit_pips'] = last_profit_pips
-                        
-                        # Store close price if available
-                        if 'close_price' in order:
-                            order['close_price'] = order.get('close_price', 0.0)
-                        
-                        orders_updated = True
-                        logger.info(f"✅ Order {order_id} marked as closed with preserved profit: ${last_profit:.2f} ({last_profit_pips:.2f} pips)")
+                # Use the comprehensive monitoring function for each cycle
+                try:
+                    # This will handle all the logic including grid 0 closure, grid order synchronization, etc.
+                    result = self._monitor_active_orders_status(cycle)
+                    if result:
+                        # Count closed orders for this cycle
+                        closed_in_cycle = [o for o in cycle.orders if o.get('status') == 'closed' and o.get('closed_reason') == 'mt5_position_closed']
+                        cycle_orders_closed = len(closed_in_cycle)
+                        if cycle_orders_closed > 0:
+                            orders_updated = True
+                            total_orders_closed += cycle_orders_closed
+                            logger.info(f"📊 Cycle {cycle.cycle_id}: {cycle_orders_closed} orders closed in MT5")
+                except Exception as cycle_error:
+                    logger.error(f"❌ Error monitoring orders for cycle {cycle.cycle_id}: {str(cycle_error)}")
+                    continue
                 
-                # If orders were updated, recalculate cycle statistics
+                # Also check for pending orders that might have been filled or cancelled
+                if hasattr(cycle, 'pending_orders') and cycle.pending_orders:
+                    for pending_order in cycle.pending_orders[:]:  # Copy list to avoid modification during iteration
+                        order_id = pending_order.get('order_id')
+                        if not order_id:
+                            continue
+                        
+                        total_orders_checked += 1
+                        
+                        try:
+                            # Check if pending order still exists in MT5
+                            if not self._order_exists_in_mt5(order_id):
+                                # Pending order no longer exists - it was either filled or cancelled
+                                logger.info(f"🔄 Pending order {order_id} no longer exists in MT5")
+                                
+                                # Check if it was filled (became an active position) or cancelled
+                                # If it was filled, it should already be in cycle.orders as active
+                                # If it was cancelled, remove from pending orders
+                                
+                                # Check if this order exists in cycle.orders as active
+                                found_as_active = False
+                                for order in cycle.orders:
+                                    if order.get('order_id') == order_id and order.get('status') == 'active':
+                                        found_as_active = True
+                                        logger.info(f"✅ Pending order {order_id} was filled and is now active")
+                                        break
+                                
+                                if not found_as_active:
+                                    # Order was cancelled or closed - remove from pending orders
+                                    logger.info(f"🗑️ Pending order {order_id} was cancelled or closed - removing from pending orders")
+                                    cycle.pending_orders.remove(pending_order)
+                                    if hasattr(cycle, 'pending_order_levels'):
+                                        grid_level = pending_order.get('grid_level')
+                                        cycle.pending_order_levels.discard(grid_level)
+                                    
+                                    # Update status in main orders list if it exists
+                                    for order in cycle.orders:
+                                        if order.get('order_id') == order_id:
+                                            order['status'] = 'cancelled'
+                                            order['cancelled_at'] = datetime.datetime.now().isoformat()
+                                            order['cancelled_reason'] = 'mt5_pending_order_cancelled'
+                                            orders_updated = True
+                                            break
+                        except Exception as pending_error:
+                            logger.error(f"❌ Error checking pending order {order_id}: {str(pending_error)}")
+                            continue
+                
+                # Count all active orders checked
+                active_orders = [o for o in cycle.orders if o.get('status') == 'active']
+                total_orders_checked += len(active_orders)
+                
+                # If orders were updated, recalculate cycle statistics and sync to database
                 if orders_updated:
-                    self._update_cycle_statistics_with_profit(cycle)
-                    self._update_cycle_in_database(cycle)
+                    try:
+                        self._update_cycle_statistics_with_profit(cycle)
+                        self._update_cycle_in_database(cycle)
+                        
+                        # Sync pending orders to PocketBase if they were updated
+                        if hasattr(cycle, 'pending_orders'):
+                            self._sync_pending_orders_to_pocketbase(cycle)
+                    except Exception as update_error:
+                        logger.error(f"❌ Error updating cycle {cycle.cycle_id} after order status change: {str(update_error)}")
+            
+            # Log summary
+            if total_orders_closed > 0:
+                logger.info(f"📊 MT5 Order Tracking Summary: {total_cycles_checked} cycles checked, {total_orders_checked} orders checked, {total_orders_closed} orders closed")
                     
         except Exception as e:
             logger.error(f"❌ Error tracking order status: {str(e)}")
+            logger.error(traceback.format_exc())
 
     def _order_exists_in_mt5(self, order_id: int) -> bool:
         """Check if order/position still exists in MT5 (both pending orders and active positions)"""
@@ -6537,8 +6592,14 @@ class MoveGuard(Strategy):
             positions = self.meta_trader.get_position_by_ticket(int(order_id))
             if positions and len(positions) > 0:
                 return True
-                
-           
+            
+            # Check for pending orders
+            try:
+                pending_order = self.meta_trader.get_order_by_ticket(order_id)
+                if pending_order and len(pending_order) > 0:
+                    return True
+            except Exception as pending_error:
+                logger.debug(f"Could not check pending order {order_id}: {pending_error}")
             
             return False
             
