@@ -2707,7 +2707,7 @@ class MoveGuard(Strategy):
             
             # CRITICAL: When only grid 1 is active, keep its SL at initial SL pips from config
             # Only update grid orders' SL to trailing SL after grid 2 is activated
-            # Get all grid levels from active orders (excluding grid level 0/None, only grid 1+)
+                # Get all grid levels from active orders (excluding grid level 0/None, only grid 1+)
             grid_levels = [o.get('grid_level', 0) for o in active_orders if o.get('grid_level', 0) >= 1]
             
             # Check if only grid 1 is active (max level is 1, meaning no grid 2+ is active)
@@ -2715,7 +2715,7 @@ class MoveGuard(Strategy):
                 # Only grid 1 is active - keep it at initial SL pips, don't update to trailing SL
                 logger.info(f"🔒 Only grid 1 is active for cycle {cycle.cycle_id} - keeping initial SL pips from config, skipping trailing SL update")
                 return False  # Return False to indicate no modification was made (keeps initial SL)
-            
+        
             logger.debug(f"Updating SL for {len(active_orders)} active orders, skipping {len(pending_orders)} pending orders")
             # CRITICAL: Only update grid orders (grid_level >= 1), not initial orders (level 0)
             # Filter to only grid orders for SL update
@@ -3945,7 +3945,7 @@ class MoveGuard(Strategy):
                     return False
                 
                 logger.debug(f"✅ Pending orders grid levels validation passed: {pending_levels} (continues from active: {active_levels})")
-                return True
+            return True
             
         except Exception as e:
             logger.error(f"❌ Error validating pending orders grid levels: {str(e)}")
@@ -4272,25 +4272,17 @@ class MoveGuard(Strategy):
             # Calculate SL for pending order (use current trailing SL or calculate using initial_stop_loss_pips)
             pip_value = self._get_pip_value()
             order_sl = 0
-            
-            if hasattr(cycle, 'trailing_stop_loss') and cycle.trailing_stop_loss is not None and cycle.trailing_stop_loss > 0:
-                # Use existing trailing SL if it's a valid price (not pips)
-                if cycle.trailing_stop_loss > 1000:  # Valid price range for BTCUSDm
-                    order_sl = cycle.trailing_stop_loss
-                    logger.debug(f"📊 Using existing trailing SL for pending {direction} grid order: {order_sl:.5f}")
-                else:
-                    logger.warning(f"Trailing SL {cycle.trailing_stop_loss} appears to be in pips, calculating proper price using initial_stop_loss_pips")
-                    if direction == 'BUY':
-                        order_sl = target_price - (initial_stop_loss_pips * pip_value)
-                    else:  # SELL
-                        order_sl = target_price + (initial_stop_loss_pips * pip_value)
-            else:
-                # Calculate initial SL using initial_stop_loss_pips
+            if grid_level==1:
                 if direction == 'BUY':
                     order_sl = target_price - (initial_stop_loss_pips * pip_value)
-                else:  # SELL
+                else:
                     order_sl = target_price + (initial_stop_loss_pips * pip_value)
-                logger.debug(f"📊 Calculated initial SL for pending {direction} grid order using initial_stop_loss_pips ({initial_stop_loss_pips}): {order_sl:.5f}")
+            else:
+                if hasattr(cycle, 'trailing_stop_loss') and cycle.trailing_stop_loss is not None and cycle.trailing_stop_loss > 0:
+                    order_sl = cycle.trailing_stop_loss
+                else:
+                    order_sl = target_price - (initial_stop_loss_pips * pip_value)
+                    
             
             # CRITICAL: Validate SL distance from order price to prevent MT5 errors
             if order_sl > 0:
@@ -6581,7 +6573,7 @@ class MoveGuard(Strategy):
             for cycle in active_cycles:
                 if cycle.status != 'active':
                     continue
-                
+                    
                 total_cycles_checked += 1
                 orders_updated = False
                 cycle_orders_closed = 0
@@ -6601,7 +6593,7 @@ class MoveGuard(Strategy):
                 except Exception as cycle_error:
                     logger.error(f"❌ Error monitoring orders for cycle {cycle.cycle_id}: {str(cycle_error)}")
                     continue
-                
+                        
                 # Also check for pending orders that might have been filled or cancelled
                 if hasattr(cycle, 'pending_orders') and cycle.pending_orders:
                     for pending_order in cycle.pending_orders[:]:  # Copy list to avoid modification during iteration
