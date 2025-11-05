@@ -5146,14 +5146,65 @@ class MoveGuard(Strategy):
                 
                 try:
                     # Check if the order still exists as a position in MT5
-                    position = self.meta_trader.get_position_by_ticket(int(order_id))
+                    # Use comprehensive checking to ensure we catch all closed positions
+                    position = None
+                    position_exists = False
                     
-                    if not position or len(position) == 0:
+                    try:
+                        position = self.meta_trader.get_position_by_ticket(int(order_id))
+                        # Check if position exists - MT5 returns tuple or None
+                        if position is not None:
+                            # If it's a tuple, check if it has elements
+                            if isinstance(position, tuple):
+                                position_exists = len(position) > 0
+                            elif isinstance(position, list):
+                                position_exists = len(position) > 0
+                            else:
+                                # Single position object
+                                position_exists = True
+                    except Exception as pos_check_error:
+                        logger.debug(f"Error checking position {order_id}: {pos_check_error}")
+                        position_exists = False
+                    
+                    # Also verify by checking all positions to ensure ticket doesn't exist
+                    if not position_exists:
+                        try:
+                            # Double-check by getting all positions and checking if ticket exists
+                            all_positions = self.meta_trader.get_all_positions()
+                            if all_positions:
+                                for pos in all_positions:
+                                    if hasattr(pos, 'ticket') and pos.ticket == int(order_id):
+                                        position_exists = True
+                                        logger.debug(f"✅ Found position {order_id} in all_positions check")
+                                        break
+                                    elif isinstance(pos, (dict, tuple)) and (pos.get('ticket') if isinstance(pos, dict) else (pos[0] if len(pos) > 0 else None)) == int(order_id):
+                                        position_exists = True
+                                        logger.debug(f"✅ Found position {order_id} in all_positions check (dict/tuple)")
+                                        break
+                        except Exception as all_pos_error:
+                            logger.debug(f"Error checking all positions for {order_id}: {all_pos_error}")
+                    
+                    if not position_exists:
                         # Order no longer exists in MT5 - it was closed
+                        logger.info(f"🔍 Position {order_id} NOT FOUND in MT5 - marking as closed")
                         order['status'] = 'closed'
                         order['closed_at'] = datetime.datetime.now().isoformat()
                         order['closed_reason'] = 'mt5_position_closed'
                         closed_orders_count += 1
+                        
+                        # CRITICAL: Update cycle.active_orders - remove closed order from active_orders list
+                        if hasattr(cycle, 'active_orders') and isinstance(cycle.active_orders, list):
+                            # Remove the closed order from active_orders
+                            cycle.active_orders = [o for o in cycle.active_orders 
+                                                  if (o.get('order_id') or o.get('ticket')) != order_id]
+                            logger.debug(f"🗑️ Removed closed order {order_id} from cycle.active_orders")
+                        
+                        # Add to completed_orders if it exists
+                        if hasattr(cycle, 'completed_orders') and isinstance(cycle.completed_orders, list):
+                            # Make a copy to avoid reference issues
+                            order_copy = order.copy() if isinstance(order, dict) else dict(order)
+                            cycle.completed_orders.append(order_copy)
+                            logger.debug(f"➕ Added closed order {order_id} to cycle.completed_orders")
                         
                         # Log the closure
                         direction = order.get('direction', 'UNKNOWN')
@@ -5205,7 +5256,17 @@ class MoveGuard(Strategy):
                                     close_result = self._close_order(remaining_order)
                                     if close_result:
                                         logger.info(f"✅ Closed remaining grid order {remaining_order_id} (level {remaining_order.get('grid_level')}) to keep synchronized")
+                                        # Mark as closed
+                                        remaining_order['status'] = 'closed'
+                                        remaining_order['closed_at'] = datetime.datetime.now().isoformat()
+                                        remaining_order['closed_reason'] = 'synchronized_close'
                                         closed_orders_count += 1
+                                        
+                                        # Remove from active_orders
+                                        if hasattr(cycle, 'active_orders') and isinstance(cycle.active_orders, list):
+                                            cycle.active_orders = [o for o in cycle.active_orders 
+                                                                  if (o.get('order_id') or o.get('ticket')) != remaining_order_id]
+                                            logger.debug(f"🗑️ Removed synchronized closed order {remaining_order_id} from cycle.active_orders")
                                     else:
                                         logger.warning(f"⚠️ Failed to close remaining grid order {remaining_order_id}")
                                 except Exception as close_error:
@@ -5226,9 +5287,36 @@ class MoveGuard(Strategy):
                     logger.error(f"❌ Error checking order {order_id} status in MT5: {str(e)}")
                     continue
             
-            # If any orders were closed, sync to PocketBase and log status
+            # If any orders were closed, update active_orders list and sync to PocketBase
             if closed_orders_count > 0:
                 logger.info(f"📊 Cycle {cycle.cycle_id}: {closed_orders_count} orders were closed in MT5 and status updated")
+                
+                # CRITICAL: Update cycle.active_orders to reflect only active orders
+                # This ensures active_orders list is synchronized with order statuses
+                active_orders_list = [o for o in cycle.orders if o.get('status') == 'active']
+                if hasattr(cycle, 'active_orders'):
+                    cycle.active_orders = active_orders_list
+                    logger.info(f"🔄 Updated cycle.active_orders: {len(active_orders_list)} active orders remaining")
+                else:
+                    cycle.active_orders = active_orders_list
+                    logger.info(f"➕ Created cycle.active_orders: {len(active_orders_list)} active orders")
+                
+                # CRITICAL: Update completed_orders list
+                completed_orders_list = [o for o in cycle.orders if o.get('status') == 'closed']
+                if hasattr(cycle, 'completed_orders'):
+                    cycle.completed_orders = completed_orders_list
+                    logger.debug(f"🔄 Updated cycle.completed_orders: {len(completed_orders_list)} completed orders")
+                else:
+                    cycle.completed_orders = completed_orders_list
+                    logger.debug(f"➕ Created cycle.completed_orders: {len(completed_orders_list)} completed orders")
+                
+                # CRITICAL: Force immediate sync to database to ensure UI updates
+                # This sync happens AFTER updating active_orders
+                try:
+                    self._update_cycle_in_database(cycle, force_update=True)
+                    logger.info(f"✅ Immediately synced closed order statuses and updated active_orders to PocketBase for cycle {cycle.cycle_id}")
+                except Exception as immediate_sync_error:
+                    logger.warning(f"⚠️ Failed immediate sync for cycle {cycle.cycle_id}: {immediate_sync_error}")
                 
                 # CRITICAL: Check if grid orders closed and reset grid ordering if needed
                 # After grid orders close, check if no active grid orders remain
@@ -6542,34 +6630,107 @@ class MoveGuard(Strategy):
                                         break
                                 
                                 if not found_as_active:
-                                    # Order was cancelled or closed - remove from pending orders
-                                    logger.info(f"🗑️ Pending order {order_id} was cancelled or closed - removing from pending orders")
+                                    # Order was cancelled or closed - remove from pending orders and cycle.orders
+                                    logger.info(f"🗑️ Pending order {order_id} was cancelled or closed - removing from pending orders and cycle.orders")
+                                    
+                                    # Remove from pending_orders list
                                     cycle.pending_orders.remove(pending_order)
+                                    
+                                    # Remove from pending_order_levels set if it exists
                                     if hasattr(cycle, 'pending_order_levels'):
                                         grid_level = pending_order.get('grid_level')
                                         cycle.pending_order_levels.discard(grid_level)
                                     
-                                    # Update status in main orders list if it exists
+                                    # Remove from cycle.orders completely if it exists and is still pending
+                                    order_to_remove = None
                                     for order in cycle.orders:
                                         if order.get('order_id') == order_id:
-                                            order['status'] = 'cancelled'
-                                            order['cancelled_at'] = datetime.datetime.now().isoformat()
-                                            order['cancelled_reason'] = 'mt5_pending_order_cancelled'
-                                            orders_updated = True
-                                            break
+                                            # Only remove if it's still in pending status (didn't activate)
+                                            if order.get('status') == 'pending':
+                                                order_to_remove = order
+                                                logger.info(f"🗑️ Removing pending order {order_id} from cycle.orders (was cancelled in MT5, never activated)")
+                                                break
+                                            else:
+                                                # If it's not pending, just update status to cancelled
+                                                order['status'] = 'cancelled'
+                                                order['cancelled_at'] = datetime.datetime.now().isoformat()
+                                                order['cancelled_reason'] = 'mt5_pending_order_cancelled'
+                                                logger.info(f"📝 Updated order {order_id} status to cancelled (was not pending)")
+                                                orders_updated = True
+                                                break
+                                    
+                                    # Remove the order from cycle.orders if found and was pending
+                                    if order_to_remove:
+                                        cycle.orders.remove(order_to_remove)
+                                        orders_updated = True
+                                        logger.info(f"✅ Removed cancelled pending order {order_id} from cycle.orders")
                         except Exception as pending_error:
                             logger.error(f"❌ Error checking pending order {order_id}: {str(pending_error)}")
                             continue
+                
+                # Also check all pending orders in cycle.orders that might not be in pending_orders list
+                # This ensures we catch any pending orders that were added to cycle.orders but not tracked in pending_orders
+                pending_orders_in_cycle = [o for o in cycle.orders if o.get('status') == 'pending']
+                for pending_order_in_cycle in pending_orders_in_cycle[:]:  # Copy list to avoid modification during iteration
+                    order_id = pending_order_in_cycle.get('order_id') or pending_order_in_cycle.get('ticket')
+                    if not order_id:
+                        continue
+                    
+                    # Check if this pending order exists in MT5
+                    try:
+                        if not self._order_exists_in_mt5(order_id):
+                            # Pending order doesn't exist in MT5 - it was cancelled
+                            logger.info(f"🗑️ Pending order {order_id} in cycle.orders not found in MT5 - removing from cycle.orders")
+                            
+                            # Remove from cycle.orders
+                            cycle.orders.remove(pending_order_in_cycle)
+                            orders_updated = True
+                            
+                            # Also remove from pending_orders list if it exists there
+                            if hasattr(cycle, 'pending_orders') and cycle.pending_orders:
+                                for pending_order in cycle.pending_orders[:]:
+                                    if pending_order.get('order_id') == order_id:
+                                        cycle.pending_orders.remove(pending_order)
+                                        logger.info(f"🗑️ Also removed from pending_orders list")
+                                        break
+                            
+                            # Remove from pending_order_levels if it exists
+                            if hasattr(cycle, 'pending_order_levels'):
+                                grid_level = pending_order_in_cycle.get('grid_level')
+                                if grid_level:
+                                    cycle.pending_order_levels.discard(grid_level)
+                            
+                            logger.info(f"✅ Removed cancelled pending order {order_id} from cycle.orders (not found in MT5)")
+                    except Exception as check_error:
+                        logger.error(f"❌ Error checking pending order {order_id} in cycle.orders: {str(check_error)}")
+                        continue
                 
                 # Count all active orders checked
                 active_orders = [o for o in cycle.orders if o.get('status') == 'active']
                 total_orders_checked += len(active_orders)
                 
-                # If orders were updated, recalculate cycle statistics and sync to database
+                # If orders were updated, update active_orders and sync to database
                 if orders_updated:
                     try:
+                        # CRITICAL: Update cycle.active_orders to reflect only active orders
+                        active_orders_list = [o for o in cycle.orders if o.get('status') == 'active']
+                        if hasattr(cycle, 'active_orders'):
+                            cycle.active_orders = active_orders_list
+                            logger.info(f"🔄 Updated cycle.active_orders: {len(active_orders_list)} active orders for cycle {cycle.cycle_id}")
+                        else:
+                            cycle.active_orders = active_orders_list
+                            logger.info(f"➕ Created cycle.active_orders: {len(active_orders_list)} active orders for cycle {cycle.cycle_id}")
+                        
+                        # Update completed_orders list
+                        completed_orders_list = [o for o in cycle.orders if o.get('status') == 'closed']
+                        if hasattr(cycle, 'completed_orders'):
+                            cycle.completed_orders = completed_orders_list
+                        else:
+                            cycle.completed_orders = completed_orders_list
+                        
+                        # Recalculate cycle statistics and sync to database
                         self._update_cycle_statistics_with_profit(cycle)
-                        self._update_cycle_in_database(cycle)
+                        self._update_cycle_in_database(cycle, force_update=True)
                         
                         # Sync pending orders to PocketBase if they were updated
                         if hasattr(cycle, 'pending_orders'):
@@ -6586,18 +6747,60 @@ class MoveGuard(Strategy):
             logger.error(traceback.format_exc())
 
     def _order_exists_in_mt5(self, order_id: int) -> bool:
-        """Check if order/position still exists in MT5 (both pending orders and active positions)"""
+        """Check if order/position still exists in MT5 (both pending orders and active positions)
+        
+        Uses comprehensive checking to ensure we catch all cases:
+        1. Check position by ticket
+        2. Verify by checking all positions
+        3. Check pending orders by ticket
+        """
         try:
-            # Check for active positions
-            positions = self.meta_trader.get_position_by_ticket(int(order_id))
-            if positions and len(positions) > 0:
+            # Check for active positions by ticket
+            position_exists = False
+            try:
+                positions = self.meta_trader.get_position_by_ticket(int(order_id))
+                if positions is not None:
+                    if isinstance(positions, (tuple, list)):
+                        position_exists = len(positions) > 0
+                    else:
+                        position_exists = True
+            except Exception as pos_error:
+                logger.debug(f"Error checking position {order_id} by ticket: {pos_error}")
+                position_exists = False
+            
+            # If not found by ticket, double-check by getting all positions
+            if not position_exists:
+                try:
+                    all_positions = self.meta_trader.get_all_positions()
+                    if all_positions:
+                        for pos in all_positions:
+                            pos_ticket = None
+                            if hasattr(pos, 'ticket'):
+                                pos_ticket = pos.ticket
+                            elif isinstance(pos, dict):
+                                pos_ticket = pos.get('ticket')
+                            elif isinstance(pos, (tuple, list)) and len(pos) > 0:
+                                pos_ticket = pos[0] if isinstance(pos[0], (int, float)) else (pos.get('ticket') if isinstance(pos[0], dict) else None)
+                            
+                            if pos_ticket and int(pos_ticket) == int(order_id):
+                                position_exists = True
+                                logger.debug(f"✅ Found position {order_id} in all_positions")
+                                break
+                except Exception as all_pos_error:
+                    logger.debug(f"Error checking all positions for {order_id}: {all_pos_error}")
+            
+            if position_exists:
                 return True
             
             # Check for pending orders
             try:
                 pending_order = self.meta_trader.get_order_by_ticket(order_id)
-                if pending_order and len(pending_order) > 0:
-                    return True
+                if pending_order is not None:
+                    if isinstance(pending_order, (tuple, list)):
+                        if len(pending_order) > 0:
+                            return True
+                    else:
+                        return True
             except Exception as pending_error:
                 logger.debug(f"Could not check pending order {order_id}: {pending_error}")
             
