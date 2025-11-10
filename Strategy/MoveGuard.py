@@ -1744,14 +1744,17 @@ class MoveGuard(Strategy):
             logger.debug(f"🔄 Processing {len(cycles_to_process)} out of {len(active_cycles)} active cycles")
             
             # Update filtered cycles with current profit data from MetaTrader
+            # This now automatically syncs to PocketBase immediately when profits change
             self._update_cycles_profit_from_mt5(cycles_to_process)
             
             # Process batch updates if needed
             self._process_batch_updates()
             
-            # Update database with latest profit data (throttled)
+            # Note: Database sync is now handled inside _update_cycle_orders_profit_from_mt5
+            # But we still update cycles that might have other changes (non-profit updates)
             for cycle in cycles_to_process:
                 try:
+                    # Only update if not already synced by profit update (throttled)
                     self._update_cycle_in_database(cycle)
                 except Exception as e:
                     logger.error(f"❌ Error updating cycle {cycle.cycle_id} in database after profit update: {str(e)}")
@@ -2455,6 +2458,8 @@ class MoveGuard(Strategy):
                     # ENHANCED VALIDATION: Check if position exists before processing
                     if not position or len(position) == 0:
                         logger.debug(f"🔍 Position {order_id} not found in MT5 - marking order as closed")
+                        # CRITICAL: Preserve profit before marking as closed
+                        self._preserve_order_profit_before_closure(order)
                         # Mark order as closed in internal data to prevent future attempts
                         order['status'] = 'closed'
                         order['closed_reason'] = 'position_not_found'
@@ -2484,10 +2489,14 @@ class MoveGuard(Strategy):
                                 logger.info(f"✅ Added SL to interval order {order_id} at {expected_sl_price:.5f}")
                             else:
                                 logger.debug(f"🔍 Position {order_id} may have been closed - skipping SL modification")
+                                # CRITICAL: Preserve profit before marking as closed
+                                self._preserve_order_profit_before_closure(order)
                                 order['status'] = 'closed'
                                 order['closed_reason'] = 'position_closed_during_sl_update'
                         except Exception as e:
                             logger.debug(f"🔍 Failed to add SL to interval order {order_id} (position may be closed): {e}")
+                            # CRITICAL: Preserve profit before marking as closed
+                            self._preserve_order_profit_before_closure(order)
                             # Mark as closed to prevent future attempts
                             order['status'] = 'closed'
                             order['closed_reason'] = 'sl_modification_failed'
@@ -2508,10 +2517,14 @@ class MoveGuard(Strategy):
                                 logger.info(f"✅ Updated SL for interval order {order_id} to {expected_sl_price:.5f}")
                             else:
                                 logger.debug(f"🔍 Position {order_id} may have been closed - skipping SL update")
+                                # CRITICAL: Preserve profit before marking as closed
+                                self._preserve_order_profit_before_closure(order)
                                 order['status'] = 'closed'
                                 order['closed_reason'] = 'position_closed_during_sl_update'
                         except Exception as e:
                             logger.debug(f"🔍 Failed to update SL for interval order {order_id} (position may be closed): {e}")
+                            # CRITICAL: Preserve profit before marking as closed
+                            self._preserve_order_profit_before_closure(order)
                             # Mark as closed to prevent future attempts
                             order['status'] = 'closed'
                             order['closed_reason'] = 'sl_update_failed'
@@ -2741,6 +2754,8 @@ class MoveGuard(Strategy):
                     position = self.meta_trader.get_position_by_ticket(int(order_id))
                     if not position or len(position) == 0:
                         logger.debug(f"🔍 Position {order_id} not found in MT5 - order was closed, updating status")
+                        # CRITICAL: Preserve profit before marking as closed
+                        self._preserve_order_profit_before_closure(order)
                         order['status'] = 'closed'
                         order['closed_reason'] = 'position_not_found'
                         order['closed_at'] = datetime.datetime.now().isoformat()
@@ -2763,6 +2778,8 @@ class MoveGuard(Strategy):
                                     close_result = self._close_order(remaining_order)
                                     if close_result:
                                         logger.info(f"✅ Closed remaining grid order {remaining_order_id} (level {remaining_order.get('grid_level')}) to keep synchronized")
+                                        # CRITICAL: Preserve profit before marking as closed
+                                        self._preserve_order_profit_before_closure(remaining_order)
                                         remaining_order['status'] = 'closed'
                                         remaining_order['closed_reason'] = 'synchronized_close'
                                         remaining_order['closed_at'] = datetime.datetime.now().isoformat()
@@ -3622,6 +3639,14 @@ class MoveGuard(Strategy):
                     
                     logger.info(f"✅ Grid BUY order {order_info['order_id']} profit updated: ${order_profit['profit']:.2f} ({order_profit['profit_pips']:.2f} pips)")
                     
+                    # CRITICAL: Immediately sync to PocketBase after profit update
+                    try:
+                        self._update_cycle_statistics_with_profit(cycle)
+                        self._update_cycle_in_database(cycle, force_update=True)
+                        logger.info(f"🔄 Immediately synced grid BUY order profit to PocketBase for cycle {cycle.cycle_id}")
+                    except Exception as sync_error:
+                        logger.warning(f"⚠️ Failed to sync grid BUY order profit to PocketBase: {str(sync_error)}")
+                    
                 except Exception as profit_error:
                     logger.warning(f"⚠️ Failed to update grid BUY order profit for {order_info['order_id']}: {str(profit_error)}")
                     # Continue anyway - the order is still created successfully
@@ -3793,6 +3818,14 @@ class MoveGuard(Strategy):
                     order_info['last_profit_update'] = datetime.datetime.now().isoformat()
                     
                     logger.info(f"✅ Grid SELL order {order_info['order_id']} profit updated: ${order_profit['profit']:.2f} ({order_profit['profit_pips']:.2f} pips)")
+                    
+                    # CRITICAL: Immediately sync to PocketBase after profit update
+                    try:
+                        self._update_cycle_statistics_with_profit(cycle)
+                        self._update_cycle_in_database(cycle, force_update=True)
+                        logger.info(f"🔄 Immediately synced grid SELL order profit to PocketBase for cycle {cycle.cycle_id}")
+                    except Exception as sync_error:
+                        logger.warning(f"⚠️ Failed to sync grid SELL order profit to PocketBase: {str(sync_error)}")
                     
                 except Exception as profit_error:
                     logger.warning(f"⚠️ Failed to update grid SELL order profit for {order_info['order_id']}: {str(profit_error)}")
@@ -4453,27 +4486,18 @@ class MoveGuard(Strategy):
                     result = self.meta_trader.cancel_pending_order(order_id, self.symbol)
                     if result:
                         cancelled_count += 1
-                        
-                        # Update status in main orders list from 'pending' to 'cancelled'
-                        for order in cycle.orders:
-                            if order.get('order_id') == order_id:
-                                order['status'] = 'cancelled'
-                                order['cancelled_at'] = datetime.datetime.now().isoformat()
-                                logger.info(f"🔄 Updated SELL order {order_id} status from 'pending' to 'cancelled' in cycle orders")
-                                break
-                        
-                        # Remove from pending orders list
-                        cycle.pending_orders.remove(pending_order)
-                        cycle.pending_order_levels.discard(grid_level)
-                        
-                        # Remove from main orders list if it exists there
-                        try:
-                            cycle.orders.remove(pending_order)
-                        except ValueError:
-                            # Order not in main orders list - that's fine
-                            pass
-                        
-                        logger.info(f"✅ Cancelled SELL pending order {order_id} (level {grid_level})")
+
+                        cleanup_summary = self._cleanup_cycle_order_references(
+                            cycle,
+                            order_id,
+                            new_status='cancelled',
+                            keep_in_orders=False,
+                        )
+
+                        logger.info(
+                            f"✅ Cancelled SELL pending order {order_id} (level {grid_level}) "
+                            f"cleanup: {cleanup_summary}"
+                        )
                     else:
                         # Pending order cancellation failed - check if it was activated as market order
                         logger.warning(f"⚠️ Failed to cancel SELL pending order {order_id} - checking if it was activated as market order")
@@ -4491,17 +4515,14 @@ class MoveGuard(Strategy):
                                     logger.info(f"🔄 Updated SELL order {order_id} status from 'pending' to 'active' (activated)")
                                     break
                             
-                            # Remove from pending orders list since it's now active
-                            cycle.pending_orders.remove(pending_order)
-                            cycle.pending_order_levels.discard(grid_level)
-                            
-                            # Remove from main orders list if it exists there (since it's now in active_orders)
-                            try:
-                                cycle.orders.remove(pending_order)
-                            except ValueError:
-                                # Order not in main orders list - that's fine
-                                pass
-                            
+                            # Remove from pending tracking while keeping it in orders as active
+                            self._cleanup_cycle_order_references(
+                                cycle,
+                                order_id,
+                                new_status='active',
+                                keep_in_orders=True,
+                            )
+
                             # Add to active orders if the list exists
                             if hasattr(cycle, 'active_orders') and isinstance(cycle.active_orders, list):
                                 cycle.active_orders.append(pending_order)
@@ -4546,27 +4567,18 @@ class MoveGuard(Strategy):
                     result = self.meta_trader.cancel_pending_order(order_id, self.symbol)
                     if result:
                         cancelled_count += 1
-                        
-                        # Update status in main orders list from 'pending' to 'cancelled'
-                        for order in cycle.orders:
-                            if order.get('order_id') == order_id:
-                                order['status'] = 'cancelled'
-                                order['cancelled_at'] = datetime.datetime.now().isoformat()
-                                logger.info(f"🔄 Updated BUY order {order_id} status from 'pending' to 'cancelled' in cycle orders")
-                                break
-                        
-                        # Remove from pending orders list
-                        cycle.pending_orders.remove(pending_order)
-                        cycle.pending_order_levels.discard(grid_level)
-                        
-                        # Remove from main orders list if it exists there
-                        try:
-                            cycle.orders.remove(pending_order)
-                        except ValueError:
-                            # Order not in main orders list - that's fine
-                            pass
-                        
-                        logger.info(f"✅ Cancelled BUY pending order {order_id} (level {grid_level})")
+
+                        cleanup_summary = self._cleanup_cycle_order_references(
+                            cycle,
+                            order_id,
+                            new_status='cancelled',
+                            keep_in_orders=False,
+                        )
+
+                        logger.info(
+                            f"✅ Cancelled BUY pending order {order_id} (level {grid_level}) "
+                            f"cleanup: {cleanup_summary}"
+                        )
                     else:
                         # Pending order cancellation failed - check if it was activated as market order
                         logger.warning(f"⚠️ Failed to cancel BUY pending order {order_id} - checking if it was activated as market order")
@@ -4584,17 +4596,13 @@ class MoveGuard(Strategy):
                                     logger.info(f"🔄 Updated BUY order {order_id} status from 'pending' to 'active' (activated)")
                                     break
                             
-                            # Remove from pending orders list since it's now active
-                            cycle.pending_orders.remove(pending_order)
-                            cycle.pending_order_levels.discard(grid_level)
-                            
-                            # Remove from main orders list if it exists there (since it's now in active_orders)
-                            try:
-                                cycle.orders.remove(pending_order)
-                            except ValueError:
-                                # Order not in main orders list - that's fine
-                                pass
-                            
+                            self._cleanup_cycle_order_references(
+                                cycle,
+                                order_id,
+                                new_status='active',
+                                keep_in_orders=True,
+                            )
+
                             # Add to active orders if the list exists
                             if hasattr(cycle, 'active_orders') and isinstance(cycle.active_orders, list):
                                 cycle.active_orders.append(pending_order)
@@ -4667,6 +4675,11 @@ class MoveGuard(Strategy):
                                 except ValueError:
                                     pass
                                 
+                                # CRITICAL: Remove from active_orders list if it exists
+                                if hasattr(cycle, 'active_orders') and isinstance(cycle.active_orders, list):
+                                    cycle.active_orders = [o for o in cycle.active_orders 
+                                                          if (o.get('order_id') or o.get('ticket')) != order_id]
+                                
                                 logger.info(f"✅ Cancelled pending order {order_id} (level {grid_level}, price {order_price:.5f}) - below lower ({lower_boundary:.5f}) while price above upper ({upper_boundary:.5f})")
                 
                 if cancelled_count > 0:
@@ -4705,6 +4718,11 @@ class MoveGuard(Strategy):
                                     cycle.orders.remove(pending_order)
                                 except ValueError:
                                     pass
+                                
+                                # CRITICAL: Remove from active_orders list if it exists
+                                if hasattr(cycle, 'active_orders') and isinstance(cycle.active_orders, list):
+                                    cycle.active_orders = [o for o in cycle.active_orders 
+                                                          if (o.get('order_id') or o.get('ticket')) != order_id]
                                 
                                 logger.info(f"✅ Cancelled pending order {order_id} (level {grid_level}, price {order_price:.5f}) - above upper ({upper_boundary:.5f}) while price below lower ({lower_boundary:.5f})")
                 
@@ -4755,6 +4773,11 @@ class MoveGuard(Strategy):
                         except ValueError:
                             # Order not in main orders list - that's fine
                             pass
+                        
+                        # CRITICAL: Remove from active_orders list if it exists
+                        if hasattr(cycle, 'active_orders') and isinstance(cycle.active_orders, list):
+                            cycle.active_orders = [o for o in cycle.active_orders 
+                                                  if (o.get('order_id') or o.get('ticket')) != order_id]
                         
                         logger.info(f"✅ Cancelled pending order {order_id} (level {grid_level})")
                     else:
@@ -4813,6 +4836,11 @@ class MoveGuard(Strategy):
                                 # Order not in main orders list - that's fine
                                 pass
                             
+                            # CRITICAL: Remove from active_orders list if it exists
+                            if hasattr(cycle, 'active_orders') and isinstance(cycle.active_orders, list):
+                                cycle.active_orders = [o for o in cycle.active_orders 
+                                                      if (o.get('order_id') or o.get('ticket')) != order_id]
+                            
                             cancelled_count += 1  # Count as handled
                             logger.info(f"✅ Cleaned up pending order {order_id} (level {grid_level}) from cycle data")
             
@@ -4839,6 +4867,93 @@ class MoveGuard(Strategy):
         except Exception as e:
             logger.error(f"❌ Error cancelling pending orders for cycle {cycle.cycle_id}: {str(e)}")
             return False
+
+    def _cleanup_cycle_order_references(self, cycle, order_id: int, *, new_status: Optional[str] = None, keep_in_orders: bool = False) -> dict:
+        """Remove references to an order across cycle tracking collections.
+
+        Returns a summary dict indicating which collections were modified.
+        """
+        summary = {
+            'removed_from_pending': False,
+            'removed_from_orders': False,
+            'removed_from_active': False,
+            'removed_from_levels': False,
+            'status_updated': False,
+        }
+
+        try:
+            if not cycle:
+                return summary
+
+            str_order_id = str(order_id)
+            timestamp = datetime.datetime.now().isoformat()
+            archived_order = None
+            grid_level = None
+
+            # Remove from pending orders (and track grid level for set cleanup)
+            if hasattr(cycle, 'pending_orders') and cycle.pending_orders:
+                for pending_order in cycle.pending_orders[:]:
+                    pending_id = pending_order.get('order_id') or pending_order.get('ticket')
+                    if str(pending_id) == str_order_id:
+                        grid_level = pending_order.get('grid_level')
+                        cycle.pending_orders.remove(pending_order)
+                        summary['removed_from_pending'] = True
+
+                        if new_status:
+                            pending_order['status'] = new_status
+                            summary['status_updated'] = True
+                            if new_status == 'cancelled':
+                                pending_order['cancelled_at'] = timestamp
+
+                        if not keep_in_orders:
+                            archived_order = pending_order
+                        break
+
+            # Maintain pending level tracking
+            if grid_level is not None and hasattr(cycle, 'pending_order_levels'):
+                cycle.pending_order_levels.discard(grid_level)
+                summary['removed_from_levels'] = True
+
+            # Update/remove from main orders list
+            if hasattr(cycle, 'orders') and cycle.orders:
+                for idx, order in enumerate(cycle.orders):
+                    order_ref = order.get('order_id') or order.get('ticket')
+                    if str(order_ref) == str_order_id:
+                        if new_status:
+                            order['status'] = new_status
+                            summary['status_updated'] = True
+                            if new_status == 'cancelled':
+                                order['cancelled_at'] = timestamp
+                            elif new_status == 'active':
+                                order['activated_at'] = timestamp
+
+                        if not keep_in_orders:
+                            archived_order = archived_order or order
+                            cycle.orders.pop(idx)
+                            summary['removed_from_orders'] = True
+                        break
+
+            # Remove from active orders tracking if present
+            if hasattr(cycle, 'active_orders') and isinstance(cycle.active_orders, list):
+                original_len = len(cycle.active_orders)
+                cycle.active_orders = [
+                    o for o in cycle.active_orders
+                    if str(o.get('order_id') or o.get('ticket')) != str_order_id
+                ]
+                if len(cycle.active_orders) != original_len:
+                    summary['removed_from_active'] = True
+
+            # Archive cancelled orders for history when they are removed entirely
+            if archived_order and new_status == 'cancelled':
+                if not hasattr(cycle, 'cancelled_orders') or not isinstance(cycle.cancelled_orders, list):
+                    cycle.cancelled_orders = []
+                cycle.cancelled_orders.append(archived_order)
+
+            return summary
+
+        except Exception as e:
+            logger.error(f"❌ Error cleaning up order references for {order_id}: {str(e)}")
+            return summary
 
     def _get_pending_order_summary(self, cycle) -> dict:
         """Get a summary of the automatic pending order placement system for a cycle"""
@@ -4990,22 +5105,30 @@ class MoveGuard(Strategy):
                         new_trailing_sl = min(new_trailing_sl, lower)
                         cycle.trailing_stop_loss = new_trailing_sl
                         logger.info(f"📊 Updated SELL trailing SL to {new_trailing_sl:.5f} after pending order trigger")
-                        
                 elif order_status == 'cancelled':
                     # Order was cancelled (shouldn't happen normally)
                     logger.warning(f"⚠️ Pending order {order_id} was cancelled in MT5")
-                    cycle.pending_orders.remove(pending_order)
-                    cycle.pending_order_levels.discard(grid_level)
-                    
-                    # Update status in main orders list
-                    for order in cycle.orders:
-                        if order.get('order_id') == order_id:
-                            order['status'] = 'cancelled'
-                            order['cancelled_at'] = datetime.datetime.now().isoformat()
-                            break
-                    
-                    # Sync to PocketBase
+                    cleanup_summary = self._cleanup_cycle_order_references(
+                        cycle,
+                        order_id,
+                        new_status='cancelled',
+                        keep_in_orders=False,
+                    )
+
+                    logger.info(
+                        "🧹 Cancelled order cleanup summary: "
+                        f"{cleanup_summary}"
+                    )
+
+                    # Sync to PocketBase after cleanup
                     self._sync_pending_orders_to_pocketbase(cycle)
+
+                    # Maintain grid coverage by replacing the cancelled pending order
+                    replacement_success = self._maintain_pending_grid_orders(cycle, current_price, 1)
+                    if replacement_success:
+                        logger.info(f"✅ Replaced cancelled pending order {order_id} with a new grid order")
+                    else:
+                        logger.warning(f"⚠️ Failed to replace cancelled pending order {order_id}")
                     
                 elif order_status == 'pending':
                     # Order is still pending - check if price has reached target for early detection
@@ -5179,6 +5302,8 @@ class MoveGuard(Strategy):
                     if not position_exists:
                         # Order no longer exists in MT5 - it was closed
                         logger.info(f"🔍 Position {order_id} NOT FOUND in MT5 - marking as closed")
+                        # CRITICAL: Preserve profit before marking as closed
+                        self._preserve_order_profit_before_closure(order)
                         order['status'] = 'closed'
                         order['closed_at'] = datetime.datetime.now().isoformat()
                         order['closed_reason'] = 'mt5_position_closed'
@@ -5248,6 +5373,8 @@ class MoveGuard(Strategy):
                                     close_result = self._close_order(remaining_order)
                                     if close_result:
                                         logger.info(f"✅ Closed remaining grid order {remaining_order_id} (level {remaining_order.get('grid_level')}) to keep synchronized")
+                                        # CRITICAL: Preserve profit before marking as closed
+                                        self._preserve_order_profit_before_closure(remaining_order)
                                         # Mark as closed
                                         remaining_order['status'] = 'closed'
                                         remaining_order['closed_at'] = datetime.datetime.now().isoformat()
@@ -5529,6 +5656,7 @@ class MoveGuard(Strategy):
             
             valid_pending_orders = []
             valid_pending_levels = set()
+            removed_any = False
             
             for pending_order in cycle.pending_orders[:]:  # Copy to avoid modification during iteration
                 order_id = pending_order.get('order_id')
@@ -5546,17 +5674,38 @@ class MoveGuard(Strategy):
                         else:
                             # Order no longer exists in MT5 - remove from tracking
                             logger.warning(f"⚠️ Pending order {order_id} (level {grid_level}) no longer exists in MT5 - removing from tracking")
+                            self._cleanup_cycle_order_references(
+                                cycle,
+                                order_id,
+                                new_status='cancelled',
+                                keep_in_orders=False,
+                            )
+                            removed_any = True
                     except Exception as e:
                         logger.warning(f"⚠️ Could not verify pending order {order_id}: {e} - removing from tracking")
+                        self._cleanup_cycle_order_references(
+                            cycle,
+                            order_id,
+                            new_status='cancelled',
+                            keep_in_orders=False,
+                        )
+                        removed_any = True
                 else:
                     logger.warning(f"⚠️ Pending order has no order_id - removing from tracking")
+                    self._cleanup_cycle_order_references(
+                        cycle,
+                        order_id,
+                        new_status='cancelled',
+                        keep_in_orders=False,
+                    )
+                    removed_any = True
             
             # Update cycle with only valid pending orders
             cycle.pending_orders = valid_pending_orders
             cycle.pending_order_levels = valid_pending_levels
             
-            if len(valid_pending_orders) != len(cycle.pending_orders):
-                logger.info(f"🔄 Cleaned up invalid pending orders for cycle {cycle.cycle_id}: {len(valid_pending_orders)}/{len(cycle.pending_orders)} valid")
+            if removed_any:
+                logger.info(f"🔄 Cleaned up invalid pending orders for cycle {cycle.cycle_id}: {len(valid_pending_orders)} valid remaining")
                 # Sync cleaned pending orders to PocketBase
                 self._sync_pending_orders_to_pocketbase(cycle)
             
@@ -6216,32 +6365,47 @@ class MoveGuard(Strategy):
             else:
                 # Try to delete pending order
                 try:
+                    # CRITICAL: Preserve profit before closing pending order (in case it was activated)
+                    self._preserve_order_profit_before_closure(order)
+                    
                     result = self.meta_trader.delete_order(int(order_id))
                     if result is not None:
                         order['status'] = 'closed'
                         order['closed_at'] = datetime.datetime.now().isoformat()
-                        order['profit'] = 0.0
-                        order['profit_pips'] = 0.0
+                        # CRITICAL: Keep preserved profit, don't reset to 0
+                        # Only reset to 0 if order was never activated (no profit to preserve)
+                        if order.get('profit', 0.0) == 0.0 and order.get('status') != 'active':
+                            # Pending order that was never activated - no profit to preserve
+                            order['profit'] = 0.0
+                            order['profit_pips'] = 0.0
+                        # Otherwise keep the preserved profit from _preserve_order_profit_before_closure
                         # Ensure both keys are kept in sync for downstream persistence
                         order['order_id'] = int(order_id)
                         order['ticket'] = int(order_id)
-                        logger.info(f"✅ MoveGuard pending order {order_id} deleted successfully")
+                        
+                        logger.info(f"✅ MoveGuard pending order {order_id} deleted successfully (preserved profit: ${order.get('profit', 0.0):.2f})")
                         return True
                     else:
                         logger.warning(f"⚠️ MoveGuard order {order_id} not found in MetaTrader (may already be closed)")
                         # Mark as closed anyway since it's not in MT5
+                        # Keep preserved profit if it exists
                         order['status'] = 'closed'
                         order['closed_at'] = datetime.datetime.now().isoformat()
-                        order['profit'] = 0.0
-                        order['profit_pips'] = 0.0
+                        # Only reset to 0 if no profit was preserved
+                        if order.get('profit', 0.0) == 0.0:
+                            order['profit'] = 0.0
+                            order['profit_pips'] = 0.0
                         return True
                 except Exception as e:
                     logger.warning(f"⚠️ Error deleting pending order {order_id}: {e}")
                     # Mark as closed anyway since we can't find it in MT5
+                    # Keep preserved profit if it exists
                     order['status'] = 'closed'
                     order['closed_at'] = datetime.datetime.now().isoformat()
-                    order['profit'] = 0.0
-                    order['profit_pips'] = 0.0
+                    # Only reset to 0 if no profit was preserved
+                    if order.get('profit', 0.0) == 0.0:
+                        order['profit'] = 0.0
+                        order['profit_pips'] = 0.0
                     return True
         except Exception as e:
             logger.error(f"❌ Error closing order for MoveGuard: {str(e)}")
@@ -6918,19 +7082,41 @@ class MoveGuard(Strategy):
                 current_profit = getattr(position, 'profit', 0.0)
                 current_swap = getattr(position, 'swap', 0.0)
                 current_commission = getattr(position, 'commission', 0.0)
+                current_price = getattr(position, 'price_current', 0.0)
+                
+                # Calculate profit_pips if we have order price and current price
+                order_price = order.get('price', 0.0)
+                pip_value = self._get_pip_value()
+                profit_pips = 0.0
+                
+                if order_price and current_price and pip_value:
+                    order_direction = order.get('direction', 'BUY')
+                    if order_direction == 'BUY':
+                        profit_pips = (current_price - order_price) / pip_value
+                    else:  # SELL
+                        profit_pips = (order_price - current_price) / pip_value
                 
                 # Preserve the profit data in the order
                 order['profit'] = current_profit
+                order['profit_pips'] = profit_pips
                 order['swap'] = current_swap
                 order['commission'] = current_commission
-                order['close_price'] = getattr(position, 'price_current', 0.0)
+                order['close_price'] = current_price
                 
-                logger.info(f"💰 Preserved profit for order {order_id}: ${current_profit:.2f} (swap: ${current_swap:.2f}, commission: ${current_commission:.2f})")
+                logger.info(f"💰 Preserved profit for order {order_id}: ${current_profit:.2f} ({profit_pips:.2f} pips, swap: ${current_swap:.2f}, commission: ${current_commission:.2f})")
                 return True
             else:
                 # Order not found in positions, might already be closed
-                logger.debug(f"⚠️ Order {order_id} not found in positions for profit preservation")
-                return False
+                # CRITICAL: Keep existing profit value if it exists, don't reset to 0
+                existing_profit = order.get('profit', 0.0)
+                existing_profit_pips = order.get('profit_pips', 0.0)
+                
+                if existing_profit != 0.0 or existing_profit_pips != 0.0:
+                    logger.info(f"💰 Order {order_id} not found in MT5 but keeping existing profit: ${existing_profit:.2f} ({existing_profit_pips:.2f} pips)")
+                    return True
+                else:
+                    logger.debug(f"⚠️ Order {order_id} not found in positions for profit preservation and no existing profit to preserve")
+                    return False
                 
         except Exception as e:
             logger.error(f"❌ Error preserving profit for order {order_id}: {str(e)}")
@@ -6961,7 +7147,14 @@ class MoveGuard(Strategy):
             if positions and len(positions) > 0:
                 position = positions[0]
                 # Get actual profit from MetaTrader position
+                # MT5 position has 'profit' field which includes swaps and commission
                 profit = getattr(position, 'profit', 0.0)
+                swap = getattr(position, 'swap', 0.0)
+                commission = getattr(position, 'commission', 0.0)
+                
+                # If profit is 0 but we have swap/commission, log it for debugging
+                if profit == 0.0 and (swap != 0.0 or commission != 0.0):
+                    logger.debug(f"⚠️ Order {order_id} profit is 0 but has swap={swap:.2f}, commission={commission:.2f}")
                 
                 # Calculate profit in pips for reference
                 order_price = order.get('price', 0.0)
@@ -6976,14 +7169,22 @@ class MoveGuard(Strategy):
                         profit_pips = (order_price - current_price) / pip_value
                 else:
                     profit_pips = 0.0
+                    if not order_price:
+                        logger.warning(f"⚠️ Order {order_id} has no price field for profit calculation")
+                    if not current_price:
+                        logger.warning(f"⚠️ Could not get current price for profit calculation")
+                    if not pip_value:
+                        logger.warning(f"⚠️ Invalid pip_value for profit calculation")
                 
-                # Log detailed profit information for debugging
-                logger.debug(f"💰 Order {order_id} profit from MT5: ${profit:.2f}, calculated pips: {profit_pips:.2f}")
+                # Log detailed profit information for debugging (always log, not just debug level)
+                logger.info(f"💰 Order {order_id} profit from MT5: ${profit:.2f} (swap={swap:.2f}, commission={commission:.2f}), calculated pips: {profit_pips:.2f}, price={order_price:.5f}, current={current_price:.5f}")
                 
                 return {
                     'profit': profit,
                     'profit_pips': profit_pips,
-                    'close_price': current_price
+                    'close_price': current_price,
+                    'swap': swap,
+                    'commission': commission
                 }
             else:
                 # Position not found - try to get profit from order history or preserve last known value
@@ -7025,11 +7226,12 @@ class MoveGuard(Strategy):
             logger.error(f"❌ Error getting order close price: {str(e)}")
             return None
 
-    def _update_cycle_orders_profit_from_mt5(self, cycle):
+    def _update_cycle_orders_profit_from_mt5(self, cycle, sync_to_pocketbase: bool = True):
         """Update all active orders in cycle with current profit data from MetaTrader"""
         try:
             updated_count = 0
             total_active_orders = 0
+            profit_changed = False
             
             for order in cycle.orders:
                 if order.get('status') == 'active':
@@ -7048,21 +7250,41 @@ class MoveGuard(Strategy):
                         old_profit = order.get('profit', 0.0)
                         old_profit_pips = order.get('profit_pips', 0.0)
                         
-                        order['profit'] = order_profit['profit']
-                        order['profit_pips'] = order_profit['profit_pips']
-                        order['last_profit_update'] = datetime.datetime.now().isoformat()
+                        new_profit = order_profit.get('profit', 0.0)
+                        new_profit_pips = order_profit.get('profit_pips', 0.0)
                         
-                        # Log significant profit changes
-                        if abs(order_profit['profit'] - old_profit) > 0.01:  # More than 1 cent change
-                            logger.info(f"💰 Order {order_id} profit updated: ${old_profit:.2f} → ${order_profit['profit']:.2f} ({order_profit['profit_pips']:.2f} pips)")
+                        # Check if profit actually changed
+                        if abs(new_profit - old_profit) > 0.001 or abs(new_profit_pips - old_profit_pips) > 0.001:
+                            profit_changed = True
+                            order['profit'] = new_profit
+                            order['profit_pips'] = new_profit_pips
+                            order['last_profit_update'] = datetime.datetime.now().isoformat()
+                            
+                            # Log all profit updates (not just significant changes) for debugging
+                            logger.info(f"💰 Order {order_id} profit updated: ${old_profit:.2f} → ${new_profit:.2f} ({old_profit_pips:.2f} → {new_profit_pips:.2f} pips)")
+                        else:
+                            # Still update timestamp even if profit didn't change
+                            order['last_profit_update'] = datetime.datetime.now().isoformat()
                         
                         updated_count += 1
             
             if updated_count > 0:
-                logger.debug(f"✅ Updated profit data for {updated_count}/{total_active_orders} active orders in cycle {cycle.cycle_id}")
+                logger.info(f"✅ Updated profit data for {updated_count}/{total_active_orders} active orders in cycle {cycle.cycle_id}")
+                
+                # CRITICAL: Immediately sync to PocketBase if profits changed
+                if profit_changed and sync_to_pocketbase:
+                    try:
+                        # Update cycle statistics first
+                        self._update_cycle_statistics_with_profit(cycle)
+                        # Then sync to PocketBase immediately
+                        self._update_cycle_in_database(cycle, force_update=True)
+                        logger.info(f"🔄 Immediately synced updated profits to PocketBase for cycle {cycle.cycle_id}")
+                    except Exception as sync_error:
+                        logger.error(f"❌ Error syncing profits to PocketBase for cycle {cycle.cycle_id}: {str(sync_error)}")
             
         except Exception as e:
             logger.error(f"❌ Error updating cycle orders profit from MetaTrader: {str(e)}")
+            logger.error(traceback.format_exc())
 
     def _get_grid_orders_safely(self, cycle):
         """Safely get grid_orders from cycle.grid_data, handling different data types"""
@@ -7114,7 +7336,7 @@ class MoveGuard(Strategy):
         except Exception as e:
             logger.error(f"❌ Error updating all cycles profit from MetaTrader: {str(e)}")
 
-    def _update_cycles_profit_from_mt5(self, cycles):
+    def _update_cycles_profit_from_mt5(self, cycles, sync_to_pocketbase: bool = True):
         """Update specific cycles with current profit data from MetaTrader (optimized)"""
         try:
             if not cycles:
@@ -7124,17 +7346,20 @@ class MoveGuard(Strategy):
             
             for cycle in cycles:
                 try:
-                    self._update_cycle_orders_profit_from_mt5(cycle)
+                    # Update profits and sync to PocketBase immediately
+                    self._update_cycle_orders_profit_from_mt5(cycle, sync_to_pocketbase=sync_to_pocketbase)
                     updated_cycles += 1
                 except Exception as cycle_error:
                     logger.error(f"❌ Error updating profit for cycle {getattr(cycle, 'cycle_id', 'unknown')}: {str(cycle_error)}")
+                    logger.error(traceback.format_exc())
                     continue
             
             if updated_cycles > 0:
-                logger.debug(f"✅ Updated profit data for {updated_cycles}/{len(cycles)} filtered cycles")
+                logger.info(f"✅ Updated profit data for {updated_cycles}/{len(cycles)} filtered cycles")
                     
         except Exception as e:
             logger.error(f"❌ Error updating cycles profit: {str(e)}")
+            logger.error(traceback.format_exc())
 
     def get_total_active_profit_from_mt5(self) -> float:
         """Get total profit for all active cycles combined from MetaTrader"""
