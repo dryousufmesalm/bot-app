@@ -1982,7 +1982,7 @@ class MoveGuard(Strategy):
                     if hasattr(cycle, 'trailing_stop_loss') and cycle.trailing_stop_loss is not None and cycle.trailing_stop_loss > 0:
                         # Update SL for all active positions, not pending orders
                         active_positions = [o for o in getattr(cycle, 'orders', []) if o.get('status') == 'active']
-                        if len(active_positions) > 0:
+                        if len(active_positions) > 1:
                             logger.info(f"🔄 Updating trailing SL for {len(active_positions)} active position(s) to {cycle.trailing_stop_loss:.5f}")
                             success = self._update_all_orders_trailing_sl(cycle, cycle.trailing_stop_loss)
                             
