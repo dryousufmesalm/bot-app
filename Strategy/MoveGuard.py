@@ -1825,7 +1825,7 @@ class MoveGuard(Strategy):
                 initial_offset = entry_interval_pips * pip_value
 
                 # Cancel pending orders outside the zone based on current price
-                self._cancel_pending_orders_outside_zone(cycle, current_price)
+                # self._cancel_pending_orders_outside_zone(cycle, current_price)
 
                 active_order_count = len([o for o in getattr(cycle, 'orders', []) if o.get('status') == 'active'])
                 total_order_count = len([o for o in getattr(cycle, 'orders', [])])
@@ -1839,14 +1839,14 @@ class MoveGuard(Strategy):
                 if hasattr(cycle, 'pending_orders') and len(cycle.pending_orders) > 0:
                     self._cancel_pending_orders_outside_zone(cycle, current_price)
                 
-                # Check trailing stop-loss first (for both BUY and SELL cycles)
-                if active_order_count > 0 and active_grid_order_count > 0:
-                    # Log trailing stop-loss status for debugging
-                    self._log_trailing_stop_loss_status(cycle, current_price)
+                # # Check trailing stop-loss first (for both BUY and SELL cycles)
+                # if active_order_count > 0 and active_grid_order_count > 0:
+                #     # Log trailing stop-loss status for debugging
+                #     self._log_trailing_stop_loss_status(cycle, current_price)
                     
-                    if self._check_trailing_stop_loss(cycle, current_price):
-                        self._handle_trailing_stop_loss_trigger(cycle, current_price)
-                        continue
+                #     if self._check_trailing_stop_loss(cycle, current_price):
+                #         self._handle_trailing_stop_loss_trigger(cycle, current_price)
+                #         continue
              
                     # Monitor pending orders for triggers
                 self._monitor_pending_orders(cycle, current_price)
