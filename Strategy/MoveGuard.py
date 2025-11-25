@@ -190,6 +190,7 @@ class MoveGuard(Strategy):
         self.batch_update_queue = []  # Queue for batch database updates
         self.batch_update_interval = float(cfg.get("batch_update_interval", 10.0))  # Process batch updates every N seconds
         self.last_batch_update_time = 0
+        self.order_cleanup_interval_seconds = float(cfg.get("order_cleanup_interval_seconds", 45.0))
         self.cache = {}  # Simple cache for frequently accessed data
         self.cache_ttl = float(cfg.get("cache_ttl", 30.0))  # Cache time-to-live in seconds
         self.processing_throttle = {}  # Per-cycle processing throttling
@@ -247,6 +248,7 @@ class MoveGuard(Strategy):
         
         # Cycle level tracking to prevent duplicates
         self.active_cycle_levels = set()  # Track active cycle levels
+        self.last_order_cleanup_time = 0
         
         logger.info("✅ MoveGuard trading state initialized")
 
@@ -1723,6 +1725,12 @@ class MoveGuard(Strategy):
             # Get active cycles
             active_cycles = self.multi_cycle_manager.get_all_active_cycles()
             
+            # Periodic cleanup for inconsistent orders
+            current_ts = time.time()
+            if current_ts - getattr(self, 'last_order_cleanup_time', 0) >= self.order_cleanup_interval_seconds:
+                self._cleanup_inconsistent_orders(active_cycles)
+                self.last_order_cleanup_time = current_ts
+            
             # CRITICAL: Monitor all active orders status across all cycles
             # This ensures we catch any orders that were closed in MT5
             for cycle in active_cycles:
@@ -2303,243 +2311,7 @@ class MoveGuard(Strategy):
             else:
                 return entry_price + (initial_stop_loss_pips * pip_value)
 
-    def _check_and_enforce_interval_order_sl(self, cycle, current_price: float):
-        """Check and enforce SL for interval cycle orders that don't have SL or didn't close by SL."""
-        try:
-            # TEMPORARY SAFETY: Add configuration to disable this function if needed
-            if hasattr(self, 'disable_interval_sl_enforcement') and self.disable_interval_sl_enforcement:
-                return
-                
-            # Get cycle-specific configuration values
-            initial_stop_loss_pips = self.get_cycle_config_value(cycle, 'initial_stop_loss_pips', self.initial_stop_loss_pips)
-            if initial_stop_loss_pips <= 0:
-                return
-            
-            pip_value = self._get_pip_value()
-            
-            # Find active interval cycle orders (grid_level 0, is_initial=True, is_grid=True)
-            interval_orders = []
-            logger.debug(f"🔍 Starting order collection for cycle {cycle.cycle_id}")
-            
-            for i, o in enumerate(getattr(cycle, 'orders', [])):
-                logger.debug(f"🔍 Order {i}: type={type(o)}, content={o}")
-                
-                # Handle both dict and tuple formats
-                if isinstance(o, dict):
-                    logger.debug(f"🔍 Processing dict order {i}")
-                    if (o.get('status') == 'active' and 
-                        o.get('is_initial', False) and 
-                        o.get('is_grid', True) and 
-                        o.get('grid_level', 0) == 0):
-                        logger.debug(f"✅ Adding dict order {i} to interval_orders")
-                        interval_orders.append(o)
-                elif isinstance(o, (tuple, list)) and len(o) >= 4:
-                    logger.debug(f"🔍 Processing tuple order {i} with length {len(o)}")
-                    # Handle tuple format - assume structure: (order_id, status, grid_level, is_initial, ...)
-                    if (len(o) >= 5 and 
-                        o[1] == 'active' and  # status
-                        o[3] == True and      # is_initial
-                        o[2] == 0):           # grid_level
-                        # Convert tuple to dict format for processing
-                        order_dict = {
-                            'order_id': o[0],
-                            'ticket': o[0],
-                            'status': o[1],
-                            'grid_level': o[2],
-                            'is_initial': o[3],
-                            'is_grid': o[4] if len(o) > 4 else True,
-                            'direction': o[5] if len(o) > 5 else 'BUY',
-                            'price': o[6] if len(o) > 6 else 0.0
-                        }
-                        logger.debug(f"✅ Adding converted tuple order {i} to interval_orders: {order_dict}")
-                        interval_orders.append(order_dict)
-                else:
-                    logger.debug(f"⚠️ Skipping order {i} - type: {type(o)}, length: {len(o) if hasattr(o, '__len__') else 'N/A'}")
-            
-            # Ensure all orders are dictionaries - with enhanced validation
-            processed_orders = []
-            for order in interval_orders:
-                if isinstance(order, dict):
-                    processed_orders.append(order)
-                elif isinstance(order, (tuple, list)) and len(order) >= 4:
-                    # Convert remaining tuples to dictionaries
-                    try:
-                        order_dict = {
-                            'order_id': order[0] if len(order) > 0 else None,
-                            'ticket': order[0] if len(order) > 0 else None,
-                            'status': order[1] if len(order) > 1 else 'active',
-                            'grid_level': order[2] if len(order) > 2 else 0,
-                            'is_initial': order[3] if len(order) > 3 else True,
-                            'is_grid': order[4] if len(order) > 4 else True,
-                            'direction': order[5] if len(order) > 5 else 'BUY',
-                            'price': order[6] if len(order) > 6 else 0.0
-                        }
-                        processed_orders.append(order_dict)
-                        logger.debug(f"✅ Converted tuple to dict: {order_dict}")
-                    except Exception as convert_error:
-                        if not self.suppress_tuple_conversion_errors:
-                            logger.warning(f"⚠️ Failed to convert tuple order: {convert_error} - {order}")
-                        else:
-                            logger.debug(f"🔍 Suppressed tuple conversion error: {convert_error}")
-                else:
-                    logger.warning(f"⚠️ Skipping non-dict order: {type(order)} - {order}")
-            interval_orders = processed_orders
-            
-            if not interval_orders:
-                return
-            
-            logger.debug(f"🔍 Checking {len(interval_orders)} interval orders for SL enforcement in cycle {cycle.cycle_id}")
-            
-            for order in interval_orders:
-                try:
-                    # COMPREHENSIVE DEBUG: Log order type and structure
-                    logger.debug(f"🔍 Processing order type: {type(order)}")
-                    if isinstance(order, tuple):
-                        logger.debug(f"🔍 Tuple structure: length={len(order)}, content={order}")
-                        # Convert tuple to dict if it somehow got through
-                        try:
-                            order = {
-                                'order_id': order[0] if len(order) > 0 else None,
-                                'ticket': order[0] if len(order) > 0 else None,
-                                'status': order[1] if len(order) > 1 else 'active',
-                                'grid_level': order[2] if len(order) > 2 else 0,
-                                'is_initial': order[3] if len(order) > 3 else True,
-                                'is_grid': order[4] if len(order) > 4 else True,
-                                'direction': order[5] if len(order) > 5 else 'BUY',
-                                'price': order[6] if len(order) > 6 else 0.0
-                            }
-                            logger.debug(f"✅ Converted tuple to dict in processing: {order}")
-                        except Exception as convert_error:
-                            if not self.suppress_tuple_conversion_errors:
-                                logger.warning(f"⚠️ Failed to convert tuple in processing: {convert_error} - skipping")
-                            else:
-                                logger.debug(f"🔍 Suppressed tuple conversion error in processing: {convert_error}")
-                            continue
-                    elif isinstance(order, dict):
-                        logger.debug(f"🔍 Dict keys: {list(order.keys())}")
-                    else:
-                        logger.debug(f"🔍 Unknown type: {type(order)} - {order}")
-                        logger.warning(f"⚠️ Skipping unknown order type: {type(order)}")
-                        continue
-                    
-                    # Final type checking for safety
-                    if not isinstance(order, dict):
-                        logger.warning(f"⚠️ Skipping non-dict order in processing: {type(order)}")
-                        continue
-                    
-                    # SAFE ATTRIBUTE ACCESS: Use try-catch for each .get() call
-                    try:
-                        order_id = order.get('order_id') or order.get('ticket')
-                    except Exception as get_error:
-                        logger.error(f"❌ Error getting order_id: {get_error} - Order type: {type(order)}")
-                        continue
-                    
-                    try:
-                        entry_price = order.get('price', 0.0)
-                    except Exception as get_error:
-                        logger.error(f"❌ Error getting price: {get_error} - Order type: {type(order)}")
-                        continue
-                    
-                    try:
-                        direction = order.get('direction', 'BUY')
-                    except Exception as get_error:
-                        logger.error(f"❌ Error getting direction: {get_error} - Order type: {type(order)}")
-                        continue
-                    
-                    if not order_id or entry_price <= 0:
-                        logger.debug(f"⚠️ Skipping order with invalid data: ID={order_id}, Price={entry_price}")
-                        continue
-                    
-                    # Check if order has SL in MT5 - with enhanced validation
-                    position = self.meta_trader.get_position_by_ticket(int(order_id))
-                    has_sl_in_mt5 = False
-                    current_sl = 0.0
-                    
-                    # ENHANCED VALIDATION: Check if position exists before processing
-                    if not position or len(position) == 0:
-                        logger.debug(f"🔍 Position {order_id} not found in MT5 - marking order as closed")
-                        # CRITICAL: Preserve profit before marking as closed
-                        self._preserve_order_profit_before_closure(order)
-                        # Mark order as closed in internal data to prevent future attempts
-                        order['status'] = 'closed'
-                        order['closed_reason'] = 'position_not_found'
-                        continue
-                    
-                    # Position exists - check SL status
-                    if position and len(position) > 0:
-                        # Get the first position object and access its attributes safely
-                        position_obj = position[0]
-                        current_sl = getattr(position_obj, 'sl', 0.0)
-                        has_sl_in_mt5 = current_sl != 0.0
-                    
-                    # Calculate expected SL price using same logic as trailing SL (considering movement mode)
-                    expected_sl_price = self._calculate_expected_sl_price(cycle, order, direction, entry_price)
-                    
-                    if direction == 'BUY':
-                        sl_hit = current_price <= expected_sl_price
-                    else:  # SELL
-                        sl_hit = current_price >= expected_sl_price
-                    
-                    # Case 1: Order has no SL in MT5 - add SL
-                    if not has_sl_in_mt5:
-                        logger.warning(f"🚨 Interval order {order_id} has no SL in MT5 - adding SL at {expected_sl_price:.5f}")
-                        try:
-                            result = self.meta_trader.modify_position_sl_tp(int(order_id), sl=expected_sl_price, tp=0.0)
-                            if result:
-                                logger.info(f"✅ Added SL to interval order {order_id} at {expected_sl_price:.5f}")
-                            else:
-                                logger.debug(f"🔍 Position {order_id} may have been closed - skipping SL modification")
-                                # CRITICAL: Preserve profit before marking as closed
-                                self._preserve_order_profit_before_closure(order)
-                                order['status'] = 'closed'
-                                order['closed_reason'] = 'position_closed_during_sl_update'
-                        except Exception as e:
-                            logger.debug(f"🔍 Failed to add SL to interval order {order_id} (position may be closed): {e}")
-                            # CRITICAL: Preserve profit before marking as closed
-                            self._preserve_order_profit_before_closure(order)
-                            # Mark as closed to prevent future attempts
-                            order['status'] = 'closed'
-                            order['closed_reason'] = 'sl_modification_failed'
-                    
-                    # Case 2: Order has SL but price hit SL threshold - let broker handle it
-                    elif has_sl_in_mt5 and sl_hit:
-                        logger.info(f"📊 Interval order {order_id} hit SL threshold - broker will close it")
-                        logger.info(f"   Entry: {entry_price:.5f}, Current: {current_price:.5f}, Expected SL: {expected_sl_price:.5f}")
-                        # Let the broker close the order when SL is hit - don't close it manually
-                        # The broker's platform will handle the closure at the stop loss price
-                    
-                    # Case 3: Order has SL but it's different from expected - update SL
-                    elif has_sl_in_mt5 and abs(current_sl - expected_sl_price) > 0.00001:
-                        logger.warning(f"🚨 Interval order {order_id} has incorrect SL - updating from {current_sl:.5f} to {expected_sl_price:.5f}")
-                        try:
-                            result = self.meta_trader.modify_position_sl_tp(int(order_id), sl=expected_sl_price, tp=0.0)
-                            if result:
-                                logger.info(f"✅ Updated SL for interval order {order_id} to {expected_sl_price:.5f}")
-                            else:
-                                logger.debug(f"🔍 Position {order_id} may have been closed - skipping SL update")
-                                # CRITICAL: Preserve profit before marking as closed
-                                self._preserve_order_profit_before_closure(order)
-                                order['status'] = 'closed'
-                                order['closed_reason'] = 'position_closed_during_sl_update'
-                        except Exception as e:
-                            logger.debug(f"🔍 Failed to update SL for interval order {order_id} (position may be closed): {e}")
-                            # CRITICAL: Preserve profit before marking as closed
-                            self._preserve_order_profit_before_closure(order)
-                            # Mark as closed to prevent future attempts
-                            order['status'] = 'closed'
-                            order['closed_reason'] = 'sl_update_failed'
-                    
-                    # Log status for debugging
-                    else:
-                        logger.debug(f"✅ Interval order {order_id} SL status OK: SL={current_sl:.5f}, Expected={expected_sl_price:.5f}")
-                        
-                except Exception as order_error:
-                    logger.error(f"❌ Error processing interval order: {order_error}")
-                    continue
-                    
-        except Exception as e:
-            logger.error(f"❌ Error in _check_and_enforce_interval_order_sl: {e}")
-
+    
     def _process_zone_logic(self, current_price: float, market_data: dict, active_cycles: List):
         """Process zone logic for MoveGuard"""
         try:
@@ -2742,7 +2514,8 @@ class MoveGuard(Strategy):
             updated_count = 0
             failed_count = 0
             closed_orders = 0
-            
+            if(len(grid_orders_to_update) == 1):
+                return False;
             for order in grid_orders_to_update:
                 order_id = order.get('ticket') or order.get('order_id')
                 if not order_id:
@@ -2750,46 +2523,46 @@ class MoveGuard(Strategy):
                     continue
                 
                 try:
-                    # Check if position still exists in MT5
-                    position = self.meta_trader.get_position_by_ticket(int(order_id))
-                    if not position or len(position) == 0:
-                        logger.debug(f"🔍 Position {order_id} not found in MT5 - order was closed, updating status")
-                        # CRITICAL: Preserve profit before marking as closed
-                        self._preserve_order_profit_before_closure(order)
-                        order['status'] = 'closed'
-                        order['closed_reason'] = 'position_not_found'
-                        order['closed_at'] = datetime.datetime.now().isoformat()
-                        closed_orders += 1
+                    # # Check if position still exists in MT5
+                    # position = self.meta_trader.get_position_by_ticket(int(order_id))
+                    # if not position or len(position) == 0:
+                    #     logger.debug(f"🔍 Position {order_id} not found in MT5 - order was closed, updating status")
+                    #     # CRITICAL: Preserve profit before marking as closed
+                    #     self._preserve_order_profit_before_closure(order)
+                    #     order['status'] = 'closed'
+                    #     order['closed_reason'] = 'position_not_found'
+                    #     order['closed_at'] = datetime.datetime.now().isoformat()
+                    #     closed_orders += 1
                         
-                        # CRITICAL: If a grid order (level >= 1) was closed, immediately close all other active grid orders
-                        # This ensures all grid orders close together
-                        grid_level = order.get('grid_level', 0)
-                        if isinstance(grid_level, (int, float)) and int(grid_level) >= 1:
-                            logger.info(f"🚨 Grid order {order_id} (level {grid_level}) was closed during SL update - closing all other active grid orders to keep them synchronized")
-                            remaining_active_orders = [o for o in active_orders 
-                                                      if o.get('grid_level', 0) >= 1
-                                                      and (o.get('ticket') or o.get('order_id')) != order_id
-                                                      and o.get('status') == 'active']
+                        # # CRITICAL: If a grid order (level >= 1) was closed, immediately close all other active grid orders
+                        # # This ensures all grid orders close together
+                        # grid_level = order.get('grid_level', 0)
+                        # if isinstance(grid_level, (int, float)) and int(grid_level) >= 1:
+                        #     logger.info(f"🚨 Grid order {order_id} (level {grid_level}) was closed during SL update - closing all other active grid orders to keep them synchronized")
+                        #     remaining_active_orders = [o for o in active_orders 
+                        #                               if o.get('grid_level', 0) >= 1
+                        #                               and (o.get('ticket') or o.get('order_id')) != order_id
+                        #                               and o.get('status') == 'active']
                             
-                            for remaining_order in remaining_active_orders:
-                                remaining_order_id = remaining_order.get('ticket') or remaining_order.get('order_id')
-                                try:
-                                    # Close the remaining grid order immediately
-                                    close_result = self._close_order(remaining_order)
-                                    if close_result:
-                                        logger.info(f"✅ Closed remaining grid order {remaining_order_id} (level {remaining_order.get('grid_level')}) to keep synchronized")
-                                        # CRITICAL: Preserve profit before marking as closed
-                                        self._preserve_order_profit_before_closure(remaining_order)
-                                        remaining_order['status'] = 'closed'
-                                        remaining_order['closed_reason'] = 'synchronized_close'
-                                        remaining_order['closed_at'] = datetime.datetime.now().isoformat()
-                                        closed_orders += 1
-                                    else:
-                                        logger.warning(f"⚠️ Failed to close remaining grid order {remaining_order_id}")
-                                except Exception as close_error:
-                                    logger.error(f"❌ Error closing remaining grid order {remaining_order_id}: {close_error}")
+                        #     for remaining_order in remaining_active_orders:
+                        #         remaining_order_id = remaining_order.get('ticket') or remaining_order.get('order_id')
+                        #         try:
+                        #             # Close the remaining grid order immediately
+                        #             close_result = self._close_order(remaining_order)
+                        #             if close_result:
+                        #                 logger.info(f"✅ Closed remaining grid order {remaining_order_id} (level {remaining_order.get('grid_level')}) to keep synchronized")
+                        #                 # CRITICAL: Preserve profit before marking as closed
+                        #                 self._preserve_order_profit_before_closure(remaining_order)
+                        #                 remaining_order['status'] = 'closed'
+                        #                 remaining_order['closed_reason'] = 'synchronized_close'
+                        #                 remaining_order['closed_at'] = datetime.datetime.now().isoformat()
+                        #                 closed_orders += 1
+                        #             else:
+                        #                 logger.warning(f"⚠️ Failed to close remaining grid order {remaining_order_id}")
+                        #         except Exception as close_error:
+                        #             logger.error(f"❌ Error closing remaining grid order {remaining_order_id}: {close_error}")
                         
-                        continue
+                        # continue
                     
                     # Modify the position's stop loss in MT5
                     logger.debug(f"🔧 Attempting to modify SL for order {order_id} from {order.get('stop_loss', 'unknown')} to {new_trailing_sl:.5f}")
@@ -2843,43 +2616,7 @@ class MoveGuard(Strategy):
             logger.error(f"❌ Error updating trailing SL for cycle orders: {e}")
             return False
 
-    def _force_update_all_orders_sl(self, cycle, new_trailing_sl: float) -> bool:
-        """Force update ALL orders' SL by getting them directly from MT5"""
-        try:
-            logger.info(f"🚀 FORCE updating all orders' SL to {new_trailing_sl:.5f} for cycle {cycle.cycle_id}")
-            
-            # Get all positions from MT5 directly
-            all_positions = self.meta_trader.get_all_positions()
-            if not all_positions:
-                logger.warning("⚠️ No positions found in MT5")
-                return False
-            
-            updated_count = 0
-            
-            # Find positions that belong to this cycle
-            for position in all_positions:
-                if hasattr(position, 'comment') and 'MoveGuard' in str(position.comment):
-                    # This is a MoveGuard position
-                    try:
-                        result = self.meta_trader.modify_position_sl_tp(
-                            ticket=int(position.ticket),
-                            sl=new_trailing_sl,
-                            tp=0.0
-                        )
-                        if result:
-                            updated_count += 1
-                            logger.info(f"✅ FORCE updated SL for position {position.ticket} to {new_trailing_sl:.5f}")
-                        else:
-                            logger.warning(f"⚠️ FORCE update failed for position {position.ticket}")
-                    except Exception as e:
-                        logger.error(f"❌ FORCE update error for position {position.ticket}: {e}")
-            
-            logger.info(f"🚀 FORCE update complete: {updated_count} positions updated")
-            return updated_count > 0
-            
-        except Exception as e:
-            logger.error(f"❌ Error in force update: {e}")
-            return False
+    
 
     def _get_pip_value(self) -> float:
         """Get pip value for MoveGuard with enhanced validation"""
@@ -4062,31 +3799,49 @@ class MoveGuard(Strategy):
             # Get boundaries and calculate direction based on current price position
             initial_offset = entry_interval_pips * pip_value
             
-            # Determine direction based on current price vs boundaries
-            if current_price >= upper:
-                order_direction = 'BUY'
-                logger.info(f"🎯 Current price {current_price:.5f} >= upper {upper:.5f} → BUY direction")
-            elif current_price <= lower:
-                order_direction = 'SELL'
-                logger.info(f"🎯 Current price {current_price:.5f} <= lower {lower:.5f} → SELL direction")
-            else:
-                # Price is within bounds - use existing cycle direction
+            # CRITICAL FIX: Check if grid orders have just closed - if so, maintain cycle direction and don't switch
+            # Get active orders to check grid order status
+            active_orders_check = [o for o in getattr(cycle, 'orders', []) if o.get('status') == 'active']
+            active_grid_orders_check = [o for o in active_orders_check if o.get('grid_level', 0) >= 1]
+            has_active_grid_orders = len(active_grid_orders_check) > 0
+            
+            # CRITICAL: If no active grid orders exist (grid orders just closed), maintain cycle direction
+            # Don't switch direction based on price position when grid orders closed
+            if not has_active_grid_orders and hasattr(cycle, 'direction') and cycle.direction in ['BUY', 'SELL']:
+                # Grid orders closed - maintain existing cycle direction
                 order_direction = cycle.direction
-                logger.info(f"🎯 Current price {current_price:.5f} within bounds → keeping existing direction: {order_direction}")
-            
-            # Update cycle direction if it changed
-            if order_direction != cycle.direction:
-                old_direction = cycle.direction
-                logger.info(f"🔄 Updating cycle direction from {old_direction} to {order_direction}")
-                # Cancel pending orders with old direction before updating
-                if old_direction == 'BUY':
-                    self._cancel_buy_pending_orders(cycle)
+                logger.info(f"🔄 Grid orders closed - maintaining cycle direction: {order_direction} (preventing opposite order placement)")
+            else:
+                # Active grid orders exist or no valid direction - normal direction determination
+                if current_price >= upper:
+                    order_direction = 'BUY'
+                    logger.info(f"🎯 Current price {current_price:.5f} >= upper {upper:.5f} → BUY direction")
+                elif current_price <= lower:
+                    order_direction = 'SELL'
+                    logger.info(f"🎯 Current price {current_price:.5f} <= lower {lower:.5f} → SELL direction")
                 else:
-                    self._cancel_sell_pending_orders(cycle)
-                # Update cycle direction
-                cycle.direction = order_direction
+                    # Price is within bounds - use existing cycle direction
+                    order_direction = cycle.direction if hasattr(cycle, 'direction') and cycle.direction in ['BUY', 'SELL'] else 'BUY'
+                    logger.info(f"🎯 Current price {current_price:.5f} within bounds → keeping existing direction: {order_direction}")
             
-            logger.info(f"📋 Placing {pending_orders_needed} pending {order_direction} orders - cycle direction: {order_direction}")
+            # Only update cycle direction if it changed AND we have active grid orders
+            # Don't change direction when grid orders just closed
+            if order_direction != cycle.direction:
+                if has_active_grid_orders:
+                    # Only allow direction change when grid orders are active
+                    old_direction = cycle.direction
+                    logger.info(f"🔄 Updating cycle direction from {old_direction} to {order_direction}")
+                    # Cancel pending orders with old direction before updating
+                    if old_direction == 'BUY':
+                        self._cancel_buy_pending_orders(cycle)
+                    else:
+                        self._cancel_sell_pending_orders(cycle)
+                    # Update cycle direction
+                    cycle.direction = order_direction
+                else:
+                    # Grid orders closed - prevent direction change, maintain existing
+                    logger.info(f"🔄 Direction change BLOCKED: Grid orders closed - maintaining {cycle.direction} instead of switching to {order_direction}")
+                    order_direction = cycle.direction
             
             # Check if there's an active initial order (grid 0) of the same direction
             # Don't place pending orders if initial order is still active
@@ -4101,6 +3856,22 @@ class MoveGuard(Strategy):
                 logger.info(f"🔒 Active {order_direction} initial order (grid 0) found - skipping pending {order_direction} order placement for cycle {cycle.cycle_id}")
                 return True  # Return True to indicate we successfully handled the request (by skipping)
             
+            # Determine next grid level to place after ensuring initial order conflict is handled
+            start_level = self._get_next_grid_level(cycle)
+
+            # When about to place grid level 1, ensure no higher-level pending orders remain
+            if start_level <= 1:
+                if self._cancel_pending_orders_above_level(cycle, max_level=1):
+                    logger.warning(f"🚨 Removed high-level pending orders before placing grid 1 for cycle {cycle.cycle_id}")
+                    # Recalculate required pending orders after cleanup
+                    pending_orders_needed = self._calculate_pending_orders_needed(cycle)
+                    if pending_orders_needed <= 0:
+                        logger.info(f"📋 Grid maintenance cleanup completed; no additional pending orders required for cycle {cycle.cycle_id}")
+                        return True
+                    start_level = self._get_next_grid_level(cycle)
+
+            logger.info(f"📋 Placing {pending_orders_needed} pending {order_direction} orders - cycle direction: {order_direction}")
+            
             if order_direction == 'BUY':
                 # Check if this is a grid restart scenario
                 grid_restart_completed = getattr(cycle, 'grid_restart_completed', False)
@@ -4114,9 +3885,6 @@ class MoveGuard(Strategy):
                     grid_start_price = upper + (entry_interval_pips * pip_value)
                 
                 # Place pending orders one by one, checking for existing levels
-                # Get starting level from highest active order
-                start_level = self._get_next_grid_level(cycle)
-                
                 for order_index in range(pending_orders_needed):
                     # Calculate next level: start from highest active + order_index
                     target_level = start_level + order_index
@@ -4195,9 +3963,6 @@ class MoveGuard(Strategy):
                     grid_start_price = lower - (entry_interval_pips * pip_value)
                 
                 # Place pending orders one by one, checking for existing levels
-                # Get starting level from highest active order
-                start_level = self._get_next_grid_level(cycle)
-                
                 for order_index in range(pending_orders_needed):
                     # Calculate next level: start from highest active + order_index
                     target_level = start_level + order_index
@@ -4868,6 +4633,126 @@ class MoveGuard(Strategy):
             logger.error(f"❌ Error cancelling pending orders for cycle {cycle.cycle_id}: {str(e)}")
             return False
 
+    def _cancel_pending_orders_above_level(self, cycle, *, max_level: int = 1) -> bool:
+        """Cancel all pending orders whose grid level is greater than the allowed max_level."""
+        try:
+            if not hasattr(cycle, 'pending_orders') or not cycle.pending_orders:
+                return False
+
+            high_level_orders = [
+                pending_order for pending_order in cycle.pending_orders[:]
+                if pending_order.get('grid_level', 0) is not None and pending_order.get('grid_level', 0) > max_level
+            ]
+
+            if not high_level_orders:
+                return False
+
+            logger.warning(
+                f"🚨 Found {len(high_level_orders)} pending order(s) above allowed grid level {max_level} "
+                f"for cycle {cycle.cycle_id} - cancelling before placing new grid orders"
+            )
+
+            handled_orders = 0
+
+            for pending_order in high_level_orders:
+                order_id = pending_order.get('order_id') or pending_order.get('ticket')
+                grid_level = pending_order.get('grid_level')
+                direction = pending_order.get('direction')
+
+                if not order_id:
+                    if pending_order in getattr(cycle, 'pending_orders', []):
+                        cycle.pending_orders.remove(pending_order)
+                    if hasattr(cycle, 'pending_order_levels') and grid_level is not None:
+                        cycle.pending_order_levels.discard(grid_level)
+                    if hasattr(cycle, 'orders'):
+                        try:
+                            cycle.orders.remove(pending_order)
+                        except ValueError:
+                            pass
+                    if hasattr(cycle, 'active_orders') and isinstance(cycle.active_orders, list):
+                        cycle.active_orders = [
+                            o for o in cycle.active_orders
+                            if o is not pending_order
+                        ]
+                    logger.warning(
+                        f"⚠️ Pending order without order_id removed during high-level cleanup "
+                        f"(level {grid_level}, direction {direction})"
+                    )
+                    handled_orders += 1
+                    continue
+
+                cancel_target = order_id
+                try:
+                    cancel_target = int(str(order_id))
+                except (TypeError, ValueError):
+                    cancel_target = order_id
+
+                result = self.meta_trader.cancel_pending_order(cancel_target, self.symbol)
+
+                if result:
+                    cleanup_summary = self._cleanup_cycle_order_references(
+                        cycle,
+                        order_id,
+                        new_status='cancelled',
+                        keep_in_orders=False,
+                    )
+                    logger.info(
+                        f"✅ Cancelled pending order {order_id} (grid level {grid_level}) "
+                        f"during high-level cleanup - summary: {cleanup_summary}"
+                    )
+                    handled_orders += 1
+                    continue
+
+                logger.warning(
+                    f"⚠️ Failed to cancel pending order {order_id} (grid level {grid_level}) - checking activation state"
+                )
+
+                position = None
+                try:
+                    position = self.meta_trader.get_position_by_ticket(int(str(order_id)))
+                except (TypeError, ValueError):
+                    position = None
+
+                if position and len(position) > 0:
+                    cleanup_summary = self._cleanup_cycle_order_references(
+                        cycle,
+                        order_id,
+                        new_status='active',
+                        keep_in_orders=True,
+                    )
+                    logger.info(
+                        f"ℹ️ Pending order {order_id} appears to be active; updated tracking instead of cancelling "
+                        f"(level {grid_level}) - summary: {cleanup_summary}"
+                    )
+                    handled_orders += 1
+                else:
+                    cleanup_summary = self._cleanup_cycle_order_references(
+                        cycle,
+                        order_id,
+                        new_status='cancelled',
+                        keep_in_orders=False,
+                    )
+                    logger.warning(
+                        f"⚠️ Pending order {order_id} not found in MT5 during high-level cleanup; "
+                        f"removed from tracking - summary: {cleanup_summary}"
+                    )
+                    handled_orders += 1
+
+            if handled_orders > 0:
+                self._sync_pending_orders_to_pocketbase(cycle)
+                try:
+                    self._update_cycle_in_database(cycle, force_update=True)
+                except Exception as sync_error:
+                    logger.error(
+                        f"❌ Failed to sync cycle {cycle.cycle_id} after high-level pending order cleanup: {str(sync_error)}"
+                    )
+
+            return handled_orders > 0
+
+        except Exception as e:
+            logger.error(f"❌ Error cancelling high-level pending orders for cycle {cycle.cycle_id}: {str(e)}")
+            return False
+
     def _cleanup_cycle_order_references(self, cycle, order_id: int, *, new_status: Optional[str] = None, keep_in_orders: bool = False) -> dict:
         """Remove references to an order across cycle tracking collections.
 
@@ -5356,41 +5241,8 @@ class MoveGuard(Strategy):
                             new_distance = new_upper - new_lower
                             logger.info(f"✅ Zone boundaries updated after grid 0 closed: upper={new_upper:.5f}, lower={new_lower:.5f}")
                             logger.info(f"📏 Zone distance changed to: {new_distance:.5f} (zone_pips only: {zone_threshold_pips} pips)")
-                        
-                        # CRITICAL: If a grid order (level >= 1) was closed, immediately close all other active grid orders
-                        # This ensures all grid orders close together, preventing grid 2 from closing before grid 1 and 3
-                        if grid_level != 'N/A' and isinstance(grid_level, (int, float)) and int(grid_level) >= 1:
-                            logger.info(f"🚨 Grid order {order_id} (level {grid_level}) was closed - closing all other active grid orders to keep them synchronized")
-                            remaining_active_orders = [o for o in cycle.orders 
-                                                      if o.get('status') == 'active' 
-                                                      and o.get('grid_level', 0) >= 1
-                                                      and (o.get('ticket') or o.get('order_id')) != order_id]
-                            
-                            for remaining_order in remaining_active_orders:
-                                remaining_order_id = remaining_order.get('ticket') or remaining_order.get('order_id')
-                                try:
-                                    # Close the remaining grid order immediately
-                                    close_result = self._close_order(remaining_order)
-                                    if close_result:
-                                        logger.info(f"✅ Closed remaining grid order {remaining_order_id} (level {remaining_order.get('grid_level')}) to keep synchronized")
-                                        # CRITICAL: Preserve profit before marking as closed
-                                        self._preserve_order_profit_before_closure(remaining_order)
-                                        # Mark as closed
-                                        remaining_order['status'] = 'closed'
-                                        remaining_order['closed_at'] = datetime.datetime.now().isoformat()
-                                        remaining_order['closed_reason'] = 'synchronized_close'
-                                        closed_orders_count += 1
-                                        
-                                        # Remove from active_orders
-                                        if hasattr(cycle, 'active_orders') and isinstance(cycle.active_orders, list):
-                                            cycle.active_orders = [o for o in cycle.active_orders 
-                                                                  if (o.get('order_id') or o.get('ticket')) != remaining_order_id]
-                                            logger.debug(f"🗑️ Removed synchronized closed order {remaining_order_id} from cycle.active_orders")
-                                    else:
-                                        logger.warning(f"⚠️ Failed to close remaining grid order {remaining_order_id}")
-                                except Exception as close_error:
-                                    logger.error(f"❌ Error closing remaining grid order {remaining_order_id}: {close_error}")
-                        
+                      
+                           
                         # Update profit data if available
                         try:
                             # Try to get final profit data before marking as closed
@@ -7651,132 +7503,7 @@ class MoveGuard(Strategy):
                 lower = cycle.entry_price - (zone_threshold / 2)
             return upper, lower
 
-    def _sync_grid_0_sl_on_activation(self, cycle, direction: str):
-        """
-        Sync grid level 0 order's stop loss when grid level 1 order gets activated
-        This tightens the initial order's risk once the second order actually gets executed
-        """
-        try:
-            logger.info(f"🔄 Syncing grid 0 SL on grid 1 activation for {direction} cycle {cycle.cycle_id}")
-            
-            # Find grid level 1 order to get its stop loss
-            grid_1_orders = [o for o in getattr(cycle, 'orders', []) 
-                           if o.get('status') == 'active' and 
-                           o.get('grid_level', 0) == 1]
-            
-            if not grid_1_orders:
-                logger.warning(f"⚠️ No active grid level 1 order found in cycle {cycle.cycle_id}")
-                return False
-            
-            # Get the stop loss from grid level 1 order
-            grid_1_order = grid_1_orders[0]
-            grid_1_sl = grid_1_order.get('sl') or grid_1_order.get('stop_loss', 0.0)
-            
-            if grid_1_sl <= 0:
-                logger.warning(f"⚠️ Grid level 1 order has no valid stop loss: {grid_1_sl}")
-                return False
-            
-            # Find grid level 0 order
-            grid_0_orders = [o for o in getattr(cycle, 'orders', []) 
-                           if o.get('status') == 'active' and
-                           o.get('grid_level', 0) == 0]
-            
-            if not grid_0_orders:
-                logger.warning(f"⚠️ No active grid level 0 order found in cycle {cycle.cycle_id}")
-                return False
-            
-            # Take the first grid 0 order (should only be one)
-            grid_0_order = grid_0_orders[0]
-            order_id = grid_0_order.get('ticket') or grid_0_order.get('order_id')
-            
-            if not order_id:
-                logger.error(f"❌ Grid 0 order has no ticket/order_id")
-                return False
-            
-            logger.info(f"📊 Found grid 0 order {order_id}, updating SL from current to {grid_1_sl:.5f} (grid 1 activation)")
-            
-            # Update stop loss in MetaTrader
-            try:
-                result = self.meta_trader.modify_position_sl_tp(
-                    ticket=int(order_id),
-                    sl=grid_1_sl,
-                    tp=0.0  # Keep existing TP or 0
-                )
-                
-                if result:
-                    # Update order data in cycle
-                    grid_0_order['sl'] = grid_1_sl
-                    grid_0_order['stop_loss'] = grid_1_sl
-                    logger.info(f"✅ Successfully updated grid 0 order {order_id} SL to {grid_1_sl:.5f} (on grid 1 activation)")
-                    return True
-                else:
-                    logger.warning(f"⚠️ Failed to update grid 0 order {order_id} SL - MetaTrader returned False")
-                    return False
-                    
-            except Exception as mt5_error:
-                logger.error(f"❌ MetaTrader error updating grid 0 order {order_id} SL: {str(mt5_error)}")
-                return False
-                
-        except Exception as e:
-            logger.error(f"❌ Error syncing grid 0 SL on activation: {str(e)}")
-            import traceback
-            traceback.print_exc()
-            return False
-
-    def _sync_grid_0_sl_with_grid_1(self, cycle, grid_1_sl: float, direction: str):
-        """
-        DEPRECATED: Sync grid level 0 order's stop loss to match grid level 1's stop loss
-        This function is no longer used - stop loss sync now happens on activation, not placement
-        """
-        try:
-            logger.info(f"🔄 Syncing grid 0 SL with grid 1 SL: {grid_1_sl:.5f} for {direction} cycle {cycle.cycle_id}")
-            
-            # Find grid level 0 order
-            grid_0_orders = [o for o in getattr(cycle, 'orders', []) 
-                           if o.get('status') == 'active' and 
-                           o.get('grid_level', 0) == 0]
-            
-            if not grid_0_orders:
-                logger.warning(f"⚠️ No active grid level 0 order found in cycle {cycle.cycle_id}")
-                return False
-            
-            # Take the first grid 0 order (should only be one)
-            grid_0_order = grid_0_orders[0]
-            order_id = grid_0_order.get('ticket') or grid_0_order.get('order_id')
-            
-            if not order_id:
-                logger.error(f"❌ Grid 0 order has no ticket/order_id")
-                return False
-            
-            logger.info(f"📊 Found grid 0 order {order_id}, updating SL from current to {grid_1_sl:.5f}")
-            
-            # Update stop loss in MetaTrader
-            try:
-                result = self.meta_trader.modify_position_sl_tp(
-                    ticket=int(order_id),
-                    sl=grid_1_sl,
-                    tp=0.0  # Keep existing TP or 0
-                )
-                
-                if result:
-                    # Update order data in cycle
-                    grid_0_order['sl'] = grid_1_sl
-                    grid_0_order['stop_loss'] = grid_1_sl
-                    logger.info(f"✅ Successfully updated grid 0 order {order_id} SL to {grid_1_sl:.5f}")
-                    return True
-                else:
-                    logger.warning(f"⚠️ Failed to update grid 0 order {order_id} SL - MetaTrader returned False")
-                    return False
-                    
-            except Exception as mt5_error:
-                logger.error(f"❌ MetaTrader error updating grid 0 order {order_id} SL: {str(mt5_error)}")
-                return False
-                
-        except Exception as e:
-            logger.error(f"❌ Error syncing grid 0 SL with grid 1: {str(e)}")
-            import traceback
-            traceback.print_exc()
-            return False
+   
 
     def _update_trailing_stop_loss(self, cycle, current_price: float):
         """Update trailing stop-loss based on highest/lowest order price with zone boundary constraints"""
@@ -8194,6 +7921,175 @@ class MoveGuard(Strategy):
                 
         except Exception as e:
             logger.error(f"❌ Error cleaning up cycle levels: {str(e)}")
+
+    def _cleanup_inconsistent_orders(self, active_cycles: List):
+        """Periodic cleanup to keep local state aligned with MT5 and pending grid logic"""
+        try:
+            if not active_cycles:
+                return
+            
+            for cycle in active_cycles:
+                self._cleanup_cycle_inconsistent_orders(cycle)
+        except Exception as e:
+            logger.error(f"❌ Error during inconsistent order cleanup: {str(e)}")
+
+    def _cleanup_cycle_inconsistent_orders(self, cycle):
+        """Clean a single cycle by removing ghost orders and closing invalid grid levels"""
+        try:
+            if not cycle or cycle.status != 'active':
+                return
+            
+            orders = getattr(cycle, 'orders', [])
+            if not orders:
+                return
+            
+            pending_orders = getattr(cycle, 'pending_orders', [])
+            cycle_updated = False
+            now_iso = datetime.datetime.utcnow().isoformat()
+            
+            # Remove pending orders that no longer exist in MT5
+            pending_changed = False
+            if isinstance(pending_orders, list) and pending_orders:
+                for pending in list(pending_orders):
+                    pending_id = pending.get('order_id') or pending.get('ticket')
+                    normalized_level = self._normalize_grid_level(pending.get('grid_level'))
+                    if pending_id and not self._order_exists_in_mt5(int(pending_id)):
+                        cycle.pending_orders.remove(pending)
+                        if hasattr(cycle, 'pending_order_levels') and normalized_level is not None:
+                            try:
+                                cycle.pending_order_levels.discard(normalized_level)
+                            except Exception:
+                                pass
+                        pending_changed = True
+            
+            if pending_changed:
+                cycle_updated = True
+                try:
+                    self._sync_pending_orders_to_pocketbase(cycle)
+                except Exception as sync_err:
+                    logger.error(f"❌ Failed to sync pending orders after cleanup for cycle {cycle.cycle_id}: {sync_err}")
+            
+            current_pending_level = self._get_lowest_pending_grid_level(cycle)
+            
+            # Clean active orders missing in MT5 or violating grid constraints
+            for order in orders:
+                if order.get('status') != 'active':
+                    continue
+                
+                order_id = order.get('order_id') or order.get('ticket')
+                if not order_id:
+                    continue
+                
+                try:
+                    order_id_int = int(order_id)
+                except (TypeError, ValueError):
+                    continue
+                
+                if not self._order_exists_in_mt5(order_id_int):
+                    order['status'] = 'closed'
+                    order['closed_reason'] = 'cleanup_missing_mt5'
+                    order['closed_at'] = now_iso
+                    if hasattr(cycle, 'active_orders') and isinstance(cycle.active_orders, list):
+                        cycle.active_orders = [
+                            o for o in cycle.active_orders
+                            if self._extract_order_ticket(o) != order_id_int
+                        ]
+                    if hasattr(cycle, 'completed_orders') and isinstance(cycle.completed_orders, list):
+                        cycle.completed_orders.append(order)
+                    cycle_updated = True
+                    continue
+                
+                if current_pending_level is None:
+                    continue
+                
+                grid_level_value = self._normalize_grid_level(order.get('grid_level'))
+                if grid_level_value is None:
+                    continue
+                
+                # Close any active grid order that is at or above the earliest pending level
+                if grid_level_value > current_pending_level:
+                    if self._close_order(order):
+                        order['closed_reason'] = 'cleanup_high_grid_level'
+                        order['closed_at'] = datetime.datetime.utcnow().isoformat()
+                        if hasattr(cycle, 'active_orders') and isinstance(cycle.active_orders, list):
+                            cycle.active_orders = [
+                                o for o in cycle.active_orders
+                                if self._extract_order_ticket(o) != order_id_int
+                            ]
+                        if hasattr(cycle, 'completed_orders') and isinstance(cycle.completed_orders, list):
+                            cycle.completed_orders.append(order)
+                        cycle_updated = True
+                    else:
+                        logger.warning(f"⚠️ Failed to close grid order {order_id_int} during cleanup")
+            
+            if cycle_updated:
+                self._update_cycle_in_database(cycle, force_update=True)
+
+        except Exception as e:
+            logger.error(f"❌ Error cleaning cycle {getattr(cycle, 'cycle_id', 'unknown')} orders: {str(e)}")
+
+    def _get_lowest_pending_grid_level(self, cycle) -> Optional[int]:
+        """Return the smallest grid level among pending orders, if any"""
+        try:
+            pending_orders = getattr(cycle, 'pending_orders', [])
+            levels = []
+            if pending_orders:
+                for pending in pending_orders:
+                    normalized_level = self._normalize_grid_level(pending.get('grid_level'))
+                    if normalized_level is not None:
+                        levels.append(normalized_level)
+            if not levels and hasattr(cycle, 'pending_order_levels'):
+                for lvl in cycle.pending_order_levels:
+                    normalized_level = self._normalize_grid_level(lvl)
+                    if normalized_level is not None:
+                        levels.append(normalized_level)
+            if levels:
+                return min(levels)
+            return None
+        except Exception as e:
+            logger.error(f"❌ Error getting lowest pending grid level: {str(e)}")
+            return None
+
+    def _order_exists_in_mt5(self, ticket: int) -> bool:
+        """Check whether an order or position still exists in MT5"""
+        try:
+            if ticket is None:
+                return False
+            
+            positions = self.meta_trader.get_position_by_ticket(ticket)
+            if positions and len(positions) > 0:
+                return True
+            
+            orders = self.meta_trader.get_order_by_ticket(ticket)
+            if orders and len(orders) > 0:
+                return True
+            
+            return False
+        except Exception:
+            return False
+
+    def _normalize_grid_level(self, level_value) -> Optional[int]:
+        """Normalize grid level value to integer"""
+        try:
+            if level_value is None:
+                return None
+            if isinstance(level_value, int):
+                return level_value
+            return int(float(level_value))
+        except (ValueError, TypeError):
+            return None
+
+    def _extract_order_ticket(self, order) -> Optional[int]:
+        """Safely extract integer ticket/order_id from order dictionaries"""
+        try:
+            if not order:
+                return None
+            ticket = order.get('order_id') or order.get('ticket')
+            if ticket is None:
+                return None
+            return int(ticket)
+        except (AttributeError, TypeError, ValueError):
+            return None
 
     def _is_level_active(self, price_level):
         """Check if a price level is already active (has a cycle)"""
